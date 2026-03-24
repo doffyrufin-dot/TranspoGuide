@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import AuthHashToast from '@/app/(public)/components/AuthHashToast';
 import {
   FaSearch,
@@ -33,7 +34,27 @@ const STATS = [
   { icon: <FaChair />, label: 'RESERVATIONS', value: '1.2K+' },
 ];
 
-const HomePage = () => {
+type HomePageProps = {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+};
+
+const HomePage = async ({ searchParams }: HomePageProps) => {
+  const params = await searchParams;
+  const code = params.code;
+
+  // Prevent visible landing-page flash after OAuth by redirecting on the server.
+  if (typeof code === 'string' && code) {
+    const nextParams = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (typeof value === 'string') {
+        nextParams.set(key, value);
+      } else if (Array.isArray(value)) {
+        value.forEach((v) => nextParams.append(key, v));
+      }
+    }
+    redirect(`/login?${nextParams.toString()}`);
+  }
+
   return (
     <main className="overflow-x-hidden">
       <AuthHashToast />
