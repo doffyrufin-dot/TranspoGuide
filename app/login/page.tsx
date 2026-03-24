@@ -136,20 +136,10 @@ const LoginPage = () => {
         const oauthCode = urlParams.get('code');
 
         if (oauthCode) {
-          // Exchange OAuth code on the client so we do not depend on callback
-          // cookie writes that can vary across deployments/domains.
-          const { error: codeError } =
-            await supabase.auth.exchangeCodeForSession(oauthCode);
-          if (codeError) {
-            if (!cancelled) {
-              sileoToast.error({
-                title: 'Google sign in failed',
-                description: codeError.message,
-              });
-            }
-            completeAuthCheck();
-            return;
-          }
+          // Try exchange on the client, but do not hard-fail if it errors.
+          // In some cases Supabase auto-exchanges first (race), and session
+          // is already available even when this call returns an error.
+          await supabase.auth.exchangeCodeForSession(oauthCode);
           if (!cancelled) {
             window.history.replaceState(null, '', window.location.pathname);
           }
@@ -175,9 +165,20 @@ const LoginPage = () => {
           }
         }
 
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
+        const getSessionWithRetry = async () => {
+          for (let i = 0; i < 4; i++) {
+            const {
+              data: { session },
+            } = await supabase.auth.getSession();
+            if (session) return session;
+            if (i < 3) {
+              await new Promise((resolve) => window.setTimeout(resolve, 250));
+            }
+          }
+          return null;
+        };
+
+        const session = await getSessionWithRetry();
         if (cancelled || navigatingRef.current) return;
 
         if (forceLogin) {
