@@ -5,16 +5,34 @@ import sileoToast from '@/lib/utils/sileo-toast';
 
 export default function AuthHashToast() {
   useEffect(() => {
+    const search = new URLSearchParams(window.location.search);
+    const authCode = search.get('code');
+    if (authCode) {
+      if (!search.get('flow')) {
+        search.set('flow', 'login');
+      }
+      if (!search.get('debug')) {
+        search.set('debug', '1');
+      }
+      window.location.replace(`/auth/callback?${search.toString()}`);
+      return;
+    }
+
     const hash = window.location.hash;
     if (!hash) return;
 
     const params = new URLSearchParams(hash.replace('#', ''));
     const accessToken = params.get('access_token');
     const refreshToken = params.get('refresh_token');
-    const type = params.get('type');
+    const type = (params.get('type') || '').toLowerCase();
 
     if (accessToken && refreshToken) {
-      const targetPath = type === 'recovery' ? '/reset-password' : '/register';
+      const targetPath =
+        type === 'recovery'
+          ? '/reset-password'
+          : type === 'signup'
+          ? '/register'
+          : '/login';
       if (window.location.pathname !== targetPath) {
         window.location.replace(`${targetPath}${window.location.hash}`);
         return;
