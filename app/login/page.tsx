@@ -38,19 +38,16 @@ const LoginPage = () => {
   const [pendingEmail, setPendingEmail] = useState('');
   const [pendingName, setPendingName] = useState('');
   const navigatingRef = useRef(false);
-  const resolvedRef = useRef(false);
   const forgotEmailRef = useRef<HTMLInputElement | null>(null);
 
   const completeAuthCheck = () => {
-    if (resolvedRef.current) return;
-    resolvedRef.current = true;
     setAuthLoading(false);
   };
 
   const safeNavigate = (path: string) => {
     if (navigatingRef.current) return;
     navigatingRef.current = true;
-    resolvedRef.current = true;
+    setAuthLoading(false);
     window.location.replace(path);
   };
 
@@ -118,7 +115,7 @@ const LoginPage = () => {
   useEffect(() => {
     let cancelled = false;
     const fallbackTimer = window.setTimeout(() => {
-      if (!cancelled && !resolvedRef.current) {
+      if (!cancelled && !navigatingRef.current) {
         completeAuthCheck();
       }
     }, 2500);
@@ -149,7 +146,7 @@ const LoginPage = () => {
         const {
           data: { session },
         } = await supabase.auth.getSession();
-        if (cancelled || resolvedRef.current) return;
+        if (cancelled || navigatingRef.current) return;
 
         if (forceLogin) {
           if (session) {
@@ -193,7 +190,7 @@ const LoginPage = () => {
     } = supabase.auth.onAuthStateChange(
       async (_event: AuthChangeEvent, session: Session | null) => {
       try {
-        if (cancelled || resolvedRef.current) return;
+        if (cancelled || navigatingRef.current) return;
         if (isForceLogin()) {
           completeAuthCheck();
           return;
