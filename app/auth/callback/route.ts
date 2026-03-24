@@ -63,6 +63,12 @@ export async function GET(request: NextRequest) {
     return redirectWithReason(fallbackPath, 'no_session');
   }
 
+  // For login flow, only exchange the OAuth code for session cookies here.
+  // Let /login handle role-based redirect using shared client logic.
+  if (flow === 'login') {
+    return redirectWithReason('/login', 'oauth_session_ready');
+  }
+
   const userId = session.user.id;
   const userEmail = session.user.email;
 
