@@ -252,9 +252,9 @@ const LoginPage = () => {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        // Go directly back to /login so the browser client can exchange the
-        // OAuth session and reuse the same redirect-by-role logic.
-        redirectTo: `${appBaseUrl}/login`,
+        // Use callback route so role routing happens server-side and avoids
+        // showing landing/login before redirecting to the dashboard.
+        redirectTo: `${appBaseUrl}/auth/callback?flow=login`,
         queryParams: {
           access_type: 'offline',
           prompt: 'consent',
