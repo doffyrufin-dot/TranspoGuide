@@ -33,14 +33,17 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const reservationId = (body.reservationId || '').trim();
     const status = (body.status || '').trim().toLowerCase();
-    if (!reservationId || (status !== 'confirmed' && status !== 'rejected')) {
+    if (
+      !reservationId ||
+      (status !== 'confirmed' && status !== 'rejected' && status !== 'picked_up')
+    ) {
       return NextResponse.json({ error: 'invalid_payload' }, { status: 400 });
     }
 
     const updated = await updateReservationStatusByOperator({
       reservationId,
       operatorUserId: user.id,
-      status: status as 'confirmed' | 'rejected',
+      status: status as 'confirmed' | 'rejected' | 'picked_up',
     });
 
     return NextResponse.json({ ok: true, reservation: updated });

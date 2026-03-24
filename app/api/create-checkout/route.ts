@@ -2,7 +2,37 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
 const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY || '';
-const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+
+const normalizeBaseUrl = (value: string) => value.replace(/\/+$/, '');
+
+const resolveBaseUrl = (req: NextRequest) => {
+  const fromEnv = (
+    process.env.NEXT_PUBLIC_BASE_URL ||
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    ''
+  ).trim();
+  if (fromEnv) {
+    return normalizeBaseUrl(fromEnv);
+  }
+
+  const vercelUrl = (process.env.VERCEL_URL || '').trim();
+  if (vercelUrl) {
+    const host = vercelUrl.replace(/^https?:\/\//i, '');
+    return `https://${host}`;
+  }
+
+  const forwardedHost = (req.headers.get('x-forwarded-host') || '').trim();
+  const host = forwardedHost || (req.headers.get('host') || '').trim();
+  const forwardedProto = (req.headers.get('x-forwarded-proto') || '').trim();
+
+  if (host) {
+    const protocol =
+      forwardedProto || (host.includes('localhost') ? 'http' : 'https');
+    return `${protocol}://${host}`;
+  }
+
+  return 'http://localhost:3000';
+};
 
 const getServiceClient = () => {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -83,6 +113,7 @@ const resolveReservationToken = async (reservationId: string) => {
 
 export async function POST(req: NextRequest) {
   try {
+    const baseUrl = resolveBaseUrl(req);
     const body = await req.json();
     const {
       amount,
@@ -131,10 +162,10 @@ export async function POST(req: NextRequest) {
             send_email_receipt: true,
             show_description: true,
             show_line_items: true,
-            success_url: `${BASE_URL}/reservation/status?reservation_id=${encodeURIComponent(
+            success_url: `${baseUrl}/reservation/status?reservation_id=${encodeURIComponent(
               reservationId
             )}&reservation_token=${encodeURIComponent(reservationToken)}&payment=success`,
-            cancel_url: `${BASE_URL}/reservation/status?reservation_id=${encodeURIComponent(
+            cancel_url: `${baseUrl}/reservation/status?reservation_id=${encodeURIComponent(
               reservationId
             )}&reservation_token=${encodeURIComponent(reservationToken)}&payment=cancelled`,
             metadata: {
