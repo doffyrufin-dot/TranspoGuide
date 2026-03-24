@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, ElementType } from 'react';
 import { supabase } from '@/utils/supabase/client';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useTheme } from '@/components/ThemeProvider';
 import {
   LayoutDashboard,
@@ -142,13 +143,15 @@ export default function AdminDashboard() {
 
     void syncToken();
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!mounted) return;
-      setSessionToken(session?.access_token || '');
-      if (!session) {
-        window.location.replace('/login');
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      (_event: AuthChangeEvent, session: Session | null) => {
+        if (!mounted) return;
+        setSessionToken(session?.access_token || '');
+        if (!session) {
+          window.location.replace('/login');
+        }
       }
-    });
+    );
 
     return () => {
       mounted = false;

@@ -151,7 +151,7 @@ export default function ReservationStatusPage() {
           table: 'tbl_reservation_messages',
           filter: `reservation_id=eq.${reservationId}`,
         },
-        (payload) => {
+        (payload: { new: unknown }) => {
           const row = payload.new as ReservationMessage;
           setMessages((prev) => mergeMessages(prev, [row]));
         }

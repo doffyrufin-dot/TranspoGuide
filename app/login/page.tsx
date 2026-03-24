@@ -1,6 +1,7 @@
 'use client';
 import React, { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/utils/supabase/client';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { resolveUserRedirect } from '@/lib/services/auth.services';
 import sileoToast from '@/lib/utils/sileo-toast';
 import {
@@ -189,7 +190,8 @@ const LoginPage = () => {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    } = supabase.auth.onAuthStateChange(
+      async (_event: AuthChangeEvent, session: Session | null) => {
       try {
         if (cancelled || resolvedRef.current) return;
         if (isForceLogin()) {

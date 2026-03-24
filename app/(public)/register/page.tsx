@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { supabase } from '@/utils/supabase/client';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import sileoToast from '@/lib/utils/sileo-toast';
 import {
   FaUser,
@@ -213,7 +214,8 @@ const RegisterPage = () => {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange(
+      (_event: AuthChangeEvent, session: Session | null) => {
       if (session?.user) {
         const u = session.user;
         const authUser: AuthUser = {

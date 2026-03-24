@@ -705,7 +705,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
           table: 'tbl_reservation_messages',
           filter: `reservation_id=eq.${chatReservationId}`,
         },
-        (payload) => {
+        (payload: { new: unknown }) => {
           const row = payload.new as OperatorReservationMessage;
           setChatMessages((prev) => mergeMessages(prev, [row]));
         }

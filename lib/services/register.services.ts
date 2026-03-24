@@ -1,4 +1,5 @@
 import { supabase } from '@/utils/supabase/client';
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 
 export interface AuthUser {
   id: string;
@@ -59,13 +60,15 @@ export function onRegisterAuthStateChange(
 ): () => void {
   const {
     data: { subscription },
-  } = supabase.auth.onAuthStateChange((_event, session) => {
-    if (session?.user) {
-      callback(toAuthUser(session.user));
-      return;
+  } = supabase.auth.onAuthStateChange(
+    (_event: AuthChangeEvent, session: Session | null) => {
+      if (session?.user) {
+        callback(toAuthUser(session.user));
+        return;
+      }
+      callback(null);
     }
-    callback(null);
-  });
+  );
 
   return () => subscription.unsubscribe();
 }
