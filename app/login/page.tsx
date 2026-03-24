@@ -140,9 +140,6 @@ const LoginPage = () => {
           // In some cases Supabase auto-exchanges first (race), and session
           // is already available even when this call returns an error.
           await supabase.auth.exchangeCodeForSession(oauthCode);
-          if (!cancelled) {
-            window.history.replaceState(null, '', window.location.pathname);
-          }
         }
 
         // Fallback for implicit OAuth callback (#access_token in URL hash)
@@ -193,6 +190,14 @@ const LoginPage = () => {
         }
 
         if (!session) {
+          if (oauthCode) {
+            // Keep OAuth code recoverable through server callback when client
+            // exchange/session bootstrap did not complete in time.
+            const cb = new URLSearchParams(window.location.search);
+            cb.set('flow', 'login');
+            window.location.replace(`/auth/callback?${cb.toString()}`);
+            return;
+          }
           const statusFromQuery = getStatusFromQuery();
           if (statusFromQuery) {
             setPendingStatus(statusFromQuery);
