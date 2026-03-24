@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
       .eq('operator_user_id', user.id)
       .in('status', [...ACTIVE_QUEUE_STATUSES, 'cancelled'])
       .order('updated_at', { ascending: false })
-      .limit(200);
+      .limit(80);
 
     if (queueError) {
       return NextResponse.json(
@@ -65,10 +65,11 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const queueList = (queueRows || []) as QueueRow[];
     const nowMs = Date.now();
     const graceMs = CHAT_GRACE_MINUTES * 60 * 1000;
-    const eligibleQueueIds = (queueRows || [])
-      .filter((row: any) => {
+    const eligibleQueueIds = queueList
+      .filter((row: QueueRow) => {
         const status = String(row.status || '').toLowerCase();
         if (ACTIVE_QUEUE_STATUSES.includes(status)) return true;
         if (status !== 'cancelled') return false;
@@ -76,7 +77,7 @@ export async function GET(req: NextRequest) {
         if (!leftAt || Number.isNaN(leftAt)) return false;
         return nowMs - leftAt <= graceMs;
       })
-      .map((row: any) => row.id)
+      .map((row: QueueRow) => row.id)
       .filter(Boolean);
 
     if (!eligibleQueueIds.length) {
@@ -91,9 +92,9 @@ export async function GET(req: NextRequest) {
       .select('id, full_name, route, status, queue_id')
       .eq('operator_user_id', user.id)
       .in('queue_id', eligibleQueueIds)
-      .not('status', 'in', '(cancelled,rejected)')
+      .not('status', 'in', '(cancelled,rejected,picked_up)')
       .order('created_at', { ascending: false })
-      .limit(300);
+      .limit(120);
 
     if (reservationError) {
       return NextResponse.json(
@@ -116,7 +117,7 @@ export async function GET(req: NextRequest) {
       .select('reservation_id, sender_type, created_at')
       .in('reservation_id', reservationIds)
       .order('created_at', { ascending: false })
-      .limit(2000);
+      .limit(600);
 
     if (messageError) {
       return NextResponse.json(

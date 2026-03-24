@@ -331,9 +331,13 @@ export async function listReservationsByOperator(
 export async function updateReservationStatusByOperator(input: {
   reservationId: string;
   operatorUserId: string;
-  status: 'confirmed' | 'rejected';
+  status: 'confirmed' | 'rejected' | 'picked_up';
 }) {
   const supabase = getServiceClient();
+  const allowedCurrentStatuses =
+    input.status === 'picked_up'
+      ? ['confirmed', 'pending_operator_approval', 'paid']
+      : ['pending_payment', 'pending_operator_approval', 'paid'];
 
   const { data: rows, error } = await supabase
     .from('tbl_reservations')
@@ -343,7 +347,7 @@ export async function updateReservationStatusByOperator(input: {
     })
     .eq('id', input.reservationId)
     .eq('operator_user_id', input.operatorUserId)
-    .in('status', ['pending_payment', 'pending_operator_approval', 'paid'])
+    .in('status', allowedCurrentStatuses)
     .select('id, status')
     .limit(1);
 
@@ -372,6 +376,15 @@ export async function updateReservationStatusByOperator(input: {
 
     if (lockDeleteError) {
       throw new Error(lockDeleteError.message || 'Failed to release seats.');
+    }
+  } else if (input.status === 'picked_up') {
+    const { error: messageDeleteError } = await supabase
+      .from('tbl_reservation_messages')
+      .delete()
+      .eq('reservation_id', input.reservationId);
+
+    if (messageDeleteError) {
+      throw new Error(messageDeleteError.message || 'Failed to clear reservation chat.');
     }
   }
 

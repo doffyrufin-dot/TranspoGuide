@@ -49,7 +49,7 @@ export async function GET(req: NextRequest) {
       .eq('operator_user_id', user.id)
       .in('status', [...ACTIVE_QUEUE_STATUSES, 'cancelled'])
       .order('updated_at', { ascending: false })
-      .limit(200);
+      .limit(80);
 
     if (queueError) {
       return NextResponse.json(
@@ -83,9 +83,9 @@ export async function GET(req: NextRequest) {
       )
       .eq('operator_user_id', user.id)
       .in('queue_id', eligibleQueueIds)
-      .not('status', 'in', '(rejected,cancelled)')
+      .not('status', 'in', '(rejected,cancelled,picked_up)')
       .order('created_at', { ascending: false })
-      .limit(300);
+      .limit(120);
 
     if (reservationError) {
       return NextResponse.json(

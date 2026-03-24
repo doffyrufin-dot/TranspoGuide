@@ -85,6 +85,14 @@ const ensureReservationOwnedByOperator = async (
   if (!reservation || reservation.reservation.operator_user_id !== operatorUserId) {
     throw new Error('forbidden_operator_chat');
   }
+  const reservationStatus = String(reservation.reservation.status || '').toLowerCase();
+  if (
+    reservationStatus === 'picked_up' ||
+    reservationStatus === 'rejected' ||
+    reservationStatus === 'cancelled'
+  ) {
+    throw new Error('chat_closed');
+  }
 
   const queueId = reservation.reservation.queue_id || null;
   if (!queueId) {
@@ -120,6 +128,9 @@ export async function GET(req: NextRequest) {
     }
     if (msg === 'forbidden_operator_chat') {
       return NextResponse.json({ error: msg }, { status: 403 });
+    }
+    if (msg === 'chat_closed') {
+      return NextResponse.json({ error: msg }, { status: 409 });
     }
     if (msg === 'server_env_missing') {
       return NextResponse.json({ error: msg }, { status: 500 });
@@ -163,6 +174,9 @@ export async function POST(req: NextRequest) {
     }
     if (msg === 'forbidden_operator_chat') {
       return NextResponse.json({ error: msg }, { status: 403 });
+    }
+    if (msg === 'chat_closed') {
+      return NextResponse.json({ error: msg }, { status: 409 });
     }
     if (msg === 'server_env_missing') {
       return NextResponse.json({ error: msg }, { status: 500 });

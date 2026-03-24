@@ -2,6 +2,14 @@
 
 import React, { useState, useEffect, useMemo, ElementType } from 'react';
 import { createPortal } from 'react-dom';
+import dynamic from 'next/dynamic';
+import 'leaflet/dist/leaflet.css';
+import type {
+  MapContainerProps,
+  TileLayerProps,
+  MarkerProps,
+  PopupProps,
+} from 'react-leaflet';
 import { supabase } from '@/utils/supabase/client';
 import { useTheme } from '@/components/ThemeProvider';
 import sileoToast from '@/lib/utils/sileo-toast';
@@ -49,6 +57,23 @@ import {
   SendHorizontal,
   Smile,
 } from 'lucide-react';
+
+const LeafletMapContainer = dynamic<MapContainerProps>(
+  () => import('react-leaflet').then((m) => m.MapContainer),
+  { ssr: false }
+);
+const LeafletTileLayer = dynamic<TileLayerProps>(
+  () => import('react-leaflet').then((m) => m.TileLayer),
+  { ssr: false }
+);
+const LeafletMarker = dynamic<MarkerProps>(
+  () => import('react-leaflet').then((m) => m.Marker),
+  { ssr: false }
+);
+const LeafletPopup = dynamic<PopupProps>(
+  () => import('react-leaflet').then((m) => m.Popup),
+  { ssr: false }
+);
 
 const isAbortLikeError = (error: unknown) => {
   if (!error || typeof error !== 'object') return false;
@@ -511,11 +536,17 @@ function SidebarItem({ icon: Icon, label, active, collapsed, onClick }: {
 }
 
 function OperatorChatWidget({ accessToken }: { accessToken: string }) {
+  const CHAT_PAGE_SIZE = 20;
+  const CHAT_RENDER_LIMIT = 160;
   const [chatOpen, setChatOpen] = useState(false);
   const [chatReservationId, setChatReservationId] = useState('');
+  const [chatSearch, setChatSearch] = useState('');
+  const [chatPage, setChatPage] = useState(1);
   const [chatMessages, setChatMessages] = useState<OperatorReservationMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
+  const [chatListLoading, setChatListLoading] = useState(false);
+  const [chatMessagesLoading, setChatMessagesLoading] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [unreadThreadCount, setUnreadThreadCount] = useState(0);
@@ -557,10 +588,33 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     () => allReservations.find((r) => r.id === chatReservationId) || null,
     [allReservations, chatReservationId]
   );
+  const filteredReservations = useMemo(() => {
+    const q = chatSearch.trim().toLowerCase();
+    if (!q) return allReservations;
+    return allReservations.filter((r) => {
+      const name = String(r.full_name || '').toLowerCase();
+      const route = String(r.route || '').toLowerCase();
+      const status = String(r.status || '').toLowerCase();
+      return name.includes(q) || route.includes(q) || status.includes(q);
+    });
+  }, [allReservations, chatSearch]);
+  const totalChatPages = Math.max(
+    1,
+    Math.ceil(filteredReservations.length / CHAT_PAGE_SIZE)
+  );
+  const pagedReservations = useMemo(() => {
+    const start = (chatPage - 1) * CHAT_PAGE_SIZE;
+    return filteredReservations.slice(start, start + CHAT_PAGE_SIZE);
+  }, [filteredReservations, chatPage, CHAT_PAGE_SIZE]);
+  const renderedChatMessages = useMemo(() => {
+    if (chatMessages.length <= CHAT_RENDER_LIMIT) return chatMessages;
+    return chatMessages.slice(-CHAT_RENDER_LIMIT);
+  }, [chatMessages, CHAT_RENDER_LIMIT]);
 
   const loadReservations = async (silent = false) => {
     if (!accessToken) return;
     try {
+      if (!silent) setChatListLoading(true);
       const data = await fetchOperatorChatConversations(accessToken);
       setPendingReservations(data.conversations || []);
       setPastReservations([]);
@@ -571,6 +625,8 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
           description: error?.message || 'Please try again.',
         });
       }
+    } finally {
+      if (!silent) setChatListLoading(false);
     }
   };
 
@@ -597,6 +653,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     if (!targetId || !accessToken) return;
     const silent = !!options?.silent;
     try {
+      if (!silent) setChatMessagesLoading(true);
       const rows = await fetchOperatorReservationMessages({
         accessToken,
         reservationId: targetId,
@@ -609,6 +666,8 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
           description: error?.message || 'Please try again.',
         });
       }
+    } finally {
+      if (!silent) setChatMessagesLoading(false);
     }
   };
 
@@ -662,20 +721,21 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   useEffect(() => {
     if (!accessToken) return;
     void loadUnreadCount(true);
+    if (chatOpen) return;
     const timer = window.setInterval(() => {
       void loadUnreadCount(true);
-    }, 5000);
-    return () => window.clearInterval(timer);
+    }, 15000);
+    return () => {
+      window.clearInterval(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessToken]);
+  }, [accessToken, chatOpen]);
 
   useEffect(() => {
     if (!chatOpen) return;
-    void loadReservations(true);
-    const timer = window.setInterval(() => {
-      void loadReservations(true);
-    }, 10000);
-    return () => window.clearInterval(timer);
+    void loadReservations(false);
+    setUnreadThreadCount(0);
+    return undefined;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatOpen, accessToken]);
 
@@ -690,6 +750,26 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
       setChatReservationId(allReservations[0].id);
     }
   }, [allReservations, chatReservationId]);
+
+  useEffect(() => {
+    setChatPage(1);
+  }, [chatSearch]);
+
+  useEffect(() => {
+    if (chatPage > totalChatPages) {
+      setChatPage(totalChatPages);
+    }
+  }, [chatPage, totalChatPages]);
+
+  useEffect(() => {
+    if (!chatReservationId || !filteredReservations.length) return;
+    const idx = filteredReservations.findIndex((row) => row.id === chatReservationId);
+    if (idx < 0) return;
+    const targetPage = Math.floor(idx / CHAT_PAGE_SIZE) + 1;
+    if (targetPage !== chatPage) {
+      setChatPage(targetPage);
+    }
+  }, [chatReservationId, filteredReservations, chatPage, CHAT_PAGE_SIZE]);
 
   useEffect(() => {
     if (!chatOpen || !chatReservationId) return;
@@ -712,11 +792,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
       )
       .subscribe();
 
-    const timer = window.setInterval(() => {
-      void loadChat(chatReservationId, { silent: true });
-    }, 2000);
     return () => {
-      window.clearInterval(timer);
       void supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -731,14 +807,20 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     const el = chatBodyRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [chatMessages, chatOpen]);
+  }, [renderedChatMessages, chatOpen]);
 
   if (!mounted) return null;
 
   return createPortal(
     <>
       <button
-        onClick={() => setChatOpen((prev) => !prev)}
+        onClick={() =>
+          setChatOpen((prev) => {
+            const next = !prev;
+            if (next) setUnreadThreadCount(0);
+            return next;
+          })
+        }
         className="fixed z-[200] w-14 h-14 rounded-full flex items-center justify-center shadow-lg transition hover:scale-105 cursor-pointer relative"
         style={{
           position: 'fixed',
@@ -772,30 +854,94 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
         >
           <div className="flex items-center justify-between gap-3">
             <h3 className="text-theme font-bold">Passenger Chat</h3>
-            <button
-              onClick={() => setChatOpen(false)}
-              className="p-1 rounded-md text-muted-theme hover:text-theme"
-              title="Close chat"
-            >
-              <CloseIcon size={16} />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => void loadReservations(false)}
+                className="px-2 py-1 rounded-md text-[11px] font-semibold transition"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  border: '1px solid var(--tg-border)',
+                  color: 'var(--tg-muted)',
+                }}
+                title="Refresh chat list"
+              >
+                Refresh
+              </button>
+              <button
+                onClick={() => setChatOpen(false)}
+                className="p-1 rounded-md text-muted-theme hover:text-theme"
+                title="Close chat"
+              >
+                <CloseIcon size={16} />
+              </button>
+            </div>
           </div>
+          <input
+            value={chatSearch}
+            onChange={(e) => setChatSearch(e.target.value)}
+            placeholder="Search passenger or route..."
+            className="input-dark w-full text-xs"
+          />
 
           <select
             value={chatReservationId}
             onChange={(e) => setChatReservationId(e.target.value)}
             className="input-dark w-full text-sm"
+            disabled={chatListLoading}
           >
-            {allReservations.length === 0 ? (
+            {filteredReservations.length === 0 ? (
               <option value="">No reservations available</option>
             ) : (
-              allReservations.map((r) => (
+              pagedReservations.map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.full_name} - {r.route} ({String(r.status || '').toLowerCase()})
                 </option>
               ))
             )}
           </select>
+          {filteredReservations.length > 0 && (
+            <div className="flex items-center justify-between text-[11px] text-muted-theme">
+              <span>
+                {Math.min((chatPage - 1) * CHAT_PAGE_SIZE + 1, filteredReservations.length)}-
+                {Math.min(chatPage * CHAT_PAGE_SIZE, filteredReservations.length)} of{' '}
+                {filteredReservations.length}
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setChatPage((prev) => Math.max(1, prev - 1))}
+                  disabled={chatPage <= 1}
+                  className="px-2 py-1 rounded-md transition disabled:opacity-40 cursor-pointer"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    border: '1px solid var(--tg-border)',
+                  }}
+                >
+                  Prev
+                </button>
+                <span>
+                  {chatPage}/{totalChatPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setChatPage((prev) => Math.min(totalChatPages, prev + 1))
+                  }
+                  disabled={chatPage >= totalChatPages}
+                  className="px-2 py-1 rounded-md transition disabled:opacity-40 cursor-pointer"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    border: '1px solid var(--tg-border)',
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+          {chatListLoading && (
+            <p className="text-[11px] text-muted-theme -mt-1">Loading conversations...</p>
+          )}
 
           {selectedChatReservation && (
             <p className="text-xs text-muted-theme">
@@ -813,11 +959,13 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
               height: '280px',
             }}
           >
-            {chatMessages.length === 0 ? (
+            {chatMessagesLoading ? (
+              <p className="text-sm text-muted-theme">Loading chat...</p>
+            ) : renderedChatMessages.length === 0 ? (
               <p className="text-sm text-muted-theme">No messages yet.</p>
             ) : (
               <div className="space-y-2">
-                {chatMessages.map((msg) => {
+                {renderedChatMessages.map((msg) => {
                   const isOperator = msg.sender_type === 'operator';
                   return (
                     <div
@@ -1215,11 +1363,57 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
   const [loading, setLoading] = useState(true);
   const [queueInfo, setQueueInfo] = useState<OperatorBoardingQueueInfo | null>(null);
   const [passengers, setPassengers] = useState<OperatorBoardingPassenger[]>([]);
+  const [rowActionLoadingId, setRowActionLoadingId] = useState<string | null>(null);
+  const [mapModalOpen, setMapModalOpen] = useState(false);
+  const [mapLoading, setMapLoading] = useState(false);
+  const [mapError, setMapError] = useState('');
+  const [mapCenter, setMapCenter] = useState<[number, number]>([10.9622, 124.6276]);
+  const [mapMarker, setMapMarker] = useState<[number, number] | null>(null);
+  const [mapReservation, setMapReservation] = useState<OperatorBoardingPassenger | null>(null);
+
   const formatPeso = (value: number) =>
     `PHP ${Number(value || 0).toLocaleString('en-PH', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     })}`;
+
+  const parseCoordinatesFromText = (value: string): [number, number] | null => {
+    const match = value.match(/(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)/);
+    if (!match) return null;
+    const lat = Number(match[1]);
+    const lng = Number(match[2]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    return [lat, lng];
+  };
+
+  const resolvePickupCoordinates = async (
+    pickupLocation: string,
+    routeHint: string
+  ): Promise<[number, number] | null> => {
+    const parsed = parseCoordinatesFromText(pickupLocation);
+    if (parsed) return parsed;
+
+    const queryParts = [pickupLocation.trim(), routeHint.trim(), 'Leyte, Philippines'].filter(
+      Boolean
+    );
+    if (queryParts.length === 0) return null;
+
+    const q = encodeURIComponent(queryParts.join(', '));
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`,
+      { cache: 'no-store' }
+    );
+    if (!response.ok) return null;
+
+    const rows = (await response.json()) as Array<{ lat?: string; lon?: string }>;
+    const first = rows?.[0];
+    if (!first?.lat || !first?.lon) return null;
+    const lat = Number(first.lat);
+    const lng = Number(first.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return [lat, lng];
+  };
 
   const loadPassengers = async (silent = false) => {
     if (!accessToken) return;
@@ -1228,11 +1422,11 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
       const result = await fetchOperatorBoardingPassengers(accessToken);
       setQueueInfo(result.queue || null);
       setPassengers(result.passengers || []);
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (!silent) {
         sileoToast.error({
           title: 'Failed to load passengers',
-          description: err?.message || 'Please try again.',
+          description: err instanceof Error ? err.message : 'Please try again.',
         });
       }
       setQueueInfo(null);
@@ -1247,9 +1441,85 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken]);
 
-  const mapLinkFor = (pickupLocation: string) => {
-    const q = encodeURIComponent(pickupLocation || '');
-    return `https://www.google.com/maps/search/?api=1&query=${q}`;
+  useEffect(() => {
+    let cancelled = false;
+    void import('leaflet').then((L) => {
+      if (cancelled) return;
+      const proto = L.Icon.Default.prototype as { _getIconUrl?: unknown };
+      delete proto._getIconUrl;
+      L.Icon.Default.mergeOptions({
+        iconRetinaUrl:
+          'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+        iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleOpenPickupMap = async (row: OperatorBoardingPassenger) => {
+    const pickup = (row.pickup_location || '').trim();
+    if (!pickup) {
+      sileoToast.warning({
+        title: 'Missing pickup location',
+        description: 'Passenger has no pickup location yet.',
+      });
+      return;
+    }
+
+    setMapReservation(row);
+    setMapModalOpen(true);
+    setMapError('');
+    setMapLoading(true);
+    setMapMarker(null);
+
+    try {
+      const coords = await resolvePickupCoordinates(pickup, row.route || queueInfo?.route || '');
+      if (!coords) {
+        setMapError('Unable to locate this pickup point on the map.');
+        return;
+      }
+      setMapCenter(coords);
+      setMapMarker(coords);
+    } catch {
+      setMapError('Failed to load map coordinates. Please try again.');
+    } finally {
+      setMapLoading(false);
+    }
+  };
+
+  const closeMapModal = () => {
+    setMapModalOpen(false);
+    setMapError('');
+    setMapLoading(false);
+    setMapMarker(null);
+    setMapReservation(null);
+  };
+
+  const handlePickedUp = async (row: OperatorBoardingPassenger) => {
+    try {
+      setRowActionLoadingId(row.id);
+      await updateOperatorReservationStatus({
+        accessToken,
+        reservationId: row.id,
+        status: 'picked_up',
+      });
+      sileoToast.success({
+        title: 'Passenger marked as picked up',
+        description: `${row.full_name || 'Passenger'} was moved to completed pickup.`,
+      });
+      await loadPassengers(true);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Please try again.';
+      sileoToast.error({
+        title: 'Failed to update pickup status',
+        description: message,
+      });
+    } finally {
+      setRowActionLoadingId(null);
+    }
   };
 
   return (
@@ -1333,7 +1603,7 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
                   Time
                 </th>
                 <th className="text-right p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">
-                  Maps
+                  Actions
                 </th>
               </tr>
             </thead>
@@ -1383,15 +1653,34 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
                       </p>
                     </td>
                     <td className="p-4 text-right">
-                      <a
-                        href={mapLinkFor(row.pickup_location || '')}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs font-semibold underline"
-                        style={{ color: 'var(--primary)' }}
-                      >
-                        Open Maps
-                      </a>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleOpenPickupMap(row)}
+                          disabled={!String(row.pickup_location || '').trim()}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                          style={{
+                            background: 'var(--tg-subtle)',
+                            color: 'var(--primary)',
+                            border: '1px solid var(--tg-border-primary)',
+                          }}
+                        >
+                          View Map
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handlePickedUp(row)}
+                          disabled={rowActionLoadingId === row.id}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                          style={{
+                            background: 'rgba(34,197,94,0.14)',
+                            color: '#22c55e',
+                            border: '1px solid rgba(34,197,94,0.35)',
+                          }}
+                        >
+                          {rowActionLoadingId === row.id ? 'Saving...' : 'Picked Up'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -1400,6 +1689,88 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
           </table>
         </div>
       </div>
+
+      {mapModalOpen &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="fixed inset-0 z-[250] flex items-center justify-center px-4">
+            <button
+              type="button"
+              aria-label="Close pickup map"
+              className="absolute inset-0"
+              style={{ background: 'rgba(2, 8, 23, 0.55)' }}
+              onClick={closeMapModal}
+            />
+            <div
+              className="relative w-full max-w-3xl rounded-2xl overflow-hidden"
+              style={{
+                background: 'var(--tg-card)',
+                border: '1px solid var(--tg-border)',
+                boxShadow: 'var(--tg-shadow)',
+              }}
+            >
+              <div
+                className="px-5 py-4 flex items-start justify-between gap-3"
+                style={{ borderBottom: '1px solid var(--tg-border)' }}
+              >
+                <div>
+                  <h4 className="text-theme font-bold text-base">Passenger Pickup Map</h4>
+                  <p className="text-muted-theme text-xs mt-1">
+                    {mapReservation?.full_name || 'Passenger'} -{' '}
+                    {mapReservation?.pickup_location || 'No location'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeMapModal}
+                  className="p-2 rounded-lg transition hover:bg-[var(--tg-subtle)] cursor-pointer"
+                  style={{ color: 'var(--tg-muted)' }}
+                >
+                  <CloseIcon size={16} />
+                </button>
+              </div>
+
+              <div className="h-[380px]" style={{ background: 'var(--tg-bg-alt)' }}>
+                {mapLoading ? (
+                  <div className="h-full flex items-center justify-center text-sm text-muted-theme">
+                    Loading map...
+                  </div>
+                ) : mapMarker ? (
+                  <LeafletMapContainer
+                    center={mapCenter}
+                    zoom={16}
+                    scrollWheelZoom
+                    style={{ height: '100%', width: '100%' }}
+                  >
+                    <LeafletTileLayer
+                      attribution='&copy; OpenStreetMap contributors'
+                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    />
+                    <LeafletMarker position={mapMarker}>
+                      <LeafletPopup>
+                        <div style={{ minWidth: 200 }}>
+                          <p style={{ margin: 0, fontWeight: 700 }}>
+                            {mapReservation?.full_name || 'Passenger'}
+                          </p>
+                          <p style={{ margin: 0, fontSize: 12 }}>
+                            {mapReservation?.pickup_location || 'Pickup location'}
+                          </p>
+                        </div>
+                      </LeafletPopup>
+                    </LeafletMarker>
+                  </LeafletMapContainer>
+                ) : (
+                  <div className="h-full flex items-center justify-center px-6 text-center">
+                    <p className="text-sm text-muted-theme">
+                      {mapError || 'No map coordinates found for this pickup location.'}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 }

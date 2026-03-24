@@ -24,6 +24,8 @@ const statusLabel = (status?: string) => {
       return 'Rejected';
     case 'cancelled':
       return 'Cancelled';
+    case 'picked_up':
+      return 'Picked Up - Trip completed';
     case 'pending_payment':
       return 'Pending Payment';
     default:
@@ -172,6 +174,9 @@ export default function ReservationStatusPage() {
       ),
     [messages]
   );
+  const isChatClosed = ['picked_up', 'cancelled'].includes(
+    String(reservation?.status || '').toLowerCase()
+  );
 
   useEffect(() => {
     const el = chatBodyRef.current;
@@ -181,7 +186,7 @@ export default function ReservationStatusPage() {
 
   const handleSend = async () => {
     const text = chatInput.trim();
-    if (!text || !reservationId || sending) return;
+    if (!text || !reservationId || sending || isChatClosed) return;
 
     const tempId = `tmp-pass-${Date.now()}`;
     const tempMessage: ReservationMessage = {
@@ -214,6 +219,13 @@ export default function ReservationStatusPage() {
     } catch (error: any) {
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       setChatInput(text);
+      if ((error?.message || '').toLowerCase() === 'chat_closed') {
+        sileoToast.info({
+          title: 'Chat is closed',
+          description: 'This reservation is already completed.',
+        });
+        return;
+      }
       sileoToast.error({
         title: 'Message failed',
         description: error?.message || 'Please try again.',
@@ -423,15 +435,21 @@ export default function ReservationStatusPage() {
                 }}
                 placeholder="Type your message..."
                 className="input-dark flex-1 h-11"
+                disabled={isChatClosed}
               />
               <button
                 onClick={handleSend}
-                disabled={!chatInput.trim() || sending}
+                disabled={!chatInput.trim() || sending || isChatClosed}
                 className="btn-primary px-4 h-11"
               >
                 <FaPaperPlane />
               </button>
             </div>
+            {isChatClosed && (
+              <p className="mt-3 text-xs text-muted-theme">
+                Chat is closed because this reservation is already completed.
+              </p>
+            )}
           </div>
         </div>
 

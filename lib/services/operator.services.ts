@@ -131,7 +131,7 @@ export async function fetchOperatorReservations(
 export async function updateOperatorReservationStatus(input: {
   accessToken: string;
   reservationId: string;
-  status: 'confirmed' | 'rejected';
+  status: 'confirmed' | 'rejected' | 'picked_up';
 }) {
   const res = await fetch('/api/operator/reservations/status', {
     method: 'POST',

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-const hiddenStatuses = ['cancelled', 'rejected'];
+const hiddenStatuses = ['cancelled', 'rejected', 'picked_up'];
 
 export async function GET(req: NextRequest) {
   try {
@@ -95,4 +95,3 @@ export async function GET(req: NextRequest) {
     );
   }
 }
-

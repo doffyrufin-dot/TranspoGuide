@@ -39,6 +39,15 @@ export async function POST(req: NextRequest) {
         );
       }
       passengerReservationStatus = String(reservation.reservation.status || '').toLowerCase();
+      if (
+        passengerReservationStatus === 'picked_up' ||
+        passengerReservationStatus === 'cancelled'
+      ) {
+        return NextResponse.json(
+          { error: 'chat_closed' },
+          { status: 409 }
+        );
+      }
     }
 
     if (senderType === 'operator') {
@@ -75,6 +84,16 @@ export async function POST(req: NextRequest) {
           { error: 'forbidden_operator_chat' },
           { status: 403 }
         );
+      }
+      const operatorReservationStatus = String(
+        reservation.reservation.status || ''
+      ).toLowerCase();
+      if (
+        operatorReservationStatus === 'picked_up' ||
+        operatorReservationStatus === 'cancelled' ||
+        operatorReservationStatus === 'rejected'
+      ) {
+        return NextResponse.json({ error: 'chat_closed' }, { status: 409 });
       }
     }
 
