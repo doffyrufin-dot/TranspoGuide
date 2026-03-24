@@ -8,13 +8,8 @@ export default function AuthHashToast() {
     const search = new URLSearchParams(window.location.search);
     const authCode = search.get('code');
     if (authCode) {
-      if (!search.get('flow')) {
-        search.set('flow', 'login');
-      }
-      if (!search.get('debug')) {
-        search.set('debug', '1');
-      }
-      window.location.replace(`/auth/callback?${search.toString()}`);
+      // Keep OAuth handling centralized in /login.
+      window.location.replace(`/login?${search.toString()}`);
       return;
     }
 

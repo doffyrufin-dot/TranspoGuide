@@ -132,6 +132,29 @@ const LoginPage = () => {
     const bootstrapAuth = async () => {
       try {
         const forceLogin = isForceLogin();
+        const urlParams = new URLSearchParams(window.location.search);
+        const oauthCode = urlParams.get('code');
+
+        if (oauthCode) {
+          // Exchange OAuth code on the client so we do not depend on callback
+          // cookie writes that can vary across deployments/domains.
+          const { error: codeError } =
+            await supabase.auth.exchangeCodeForSession(oauthCode);
+          if (codeError) {
+            if (!cancelled) {
+              sileoToast.error({
+                title: 'Google sign in failed',
+                description: codeError.message,
+              });
+            }
+            completeAuthCheck();
+            return;
+          }
+          if (!cancelled) {
+            window.history.replaceState(null, '', window.location.pathname);
+          }
+        }
+
         // Fallback for implicit OAuth callback (#access_token in URL hash)
         const hash = window.location.hash.startsWith('#')
           ? window.location.hash.slice(1)
@@ -252,9 +275,8 @@ const LoginPage = () => {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        // Use callback route so role routing happens server-side and avoids
-        // showing landing/login before redirecting to the dashboard.
-        redirectTo: `${appBaseUrl}/auth/callback?flow=login`,
+        // Return to /login and exchange code there for consistent behavior.
+        redirectTo: `${appBaseUrl}/login`,
         queryParams: {
           access_type: 'offline',
           prompt: 'consent',
