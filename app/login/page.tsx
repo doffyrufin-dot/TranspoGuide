@@ -1,6 +1,10 @@
 'use client';
 import React, { useEffect, useRef, useState } from 'react';
-import { supabase } from '@/utils/supabase/client';
+import {
+  supabase,
+  SUPABASE_CONFIGURED,
+  SUPABASE_INIT_ERROR,
+} from '@/utils/supabase/client';
 import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { resolveUserRedirect } from '@/lib/services/auth.services';
 import sileoToast from '@/lib/utils/sileo-toast';
@@ -113,6 +117,11 @@ const LoginPage = () => {
   };
 
   useEffect(() => {
+    if (!SUPABASE_CONFIGURED) {
+      completeAuthCheck();
+      return;
+    }
+
     let cancelled = false;
     const fallbackTimer = window.setTimeout(() => {
       if (!cancelled && !navigatingRef.current) {
@@ -185,49 +194,67 @@ const LoginPage = () => {
 
     bootstrapAuth();
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange(
-      async (_event: AuthChangeEvent, session: Session | null) => {
-      try {
-        if (cancelled || navigatingRef.current) return;
-        if (isForceLogin()) {
-          completeAuthCheck();
-          return;
+    let subscription: { unsubscribe: () => void } | null = null;
+    try {
+      const {
+        data: { subscription: sub },
+      } = supabase.auth.onAuthStateChange(
+        async (_event: AuthChangeEvent, session: Session | null) => {
+          try {
+            if (cancelled || navigatingRef.current) return;
+            if (isForceLogin()) {
+              completeAuthCheck();
+              return;
+            }
+            if (!session) {
+              completeAuthCheck();
+              return;
+            }
+            window.history.replaceState(null, '', window.location.pathname);
+            const meta = session.user.user_metadata;
+            await redirectByRole(
+              session.user.id,
+              session.user.email,
+              meta?.full_name || meta?.name
+            );
+          } catch (error) {
+            if (cancelled) return;
+            completeAuthCheck();
+          }
         }
-        if (!session) {
-          completeAuthCheck();
-          return;
-        }
-        window.history.replaceState(null, '', window.location.pathname);
-        const meta = session.user.user_metadata;
-        await redirectByRole(
-          session.user.id,
-          session.user.email,
-          meta?.full_name || meta?.name
-        );
-      } catch (error) {
-        if (cancelled) return;
-        completeAuthCheck();
-      }
-    });
+      );
+      subscription = sub;
+    } catch {
+      completeAuthCheck();
+    }
 
     return () => {
       cancelled = true;
       window.clearTimeout(fallbackTimer);
-      subscription.unsubscribe();
+      subscription?.unsubscribe();
     };
   }, []);
 
   // ? Google Login
   const handleGoogleLogin = async () => {
+    if (!SUPABASE_CONFIGURED) {
+      sileoToast.error({
+        title: 'Missing configuration',
+        description:
+          SUPABASE_INIT_ERROR ||
+          'Supabase environment variables are not available in this deployment.',
+      });
+      return;
+    }
     setLoading(true);
     setSigningMethod('google');
     const appBaseUrl = getAppBaseUrl();
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: `${appBaseUrl}/auth/callback?debug=1&flow=login`,
+        // Go directly back to /login so the browser client can exchange the
+        // OAuth session and reuse the same redirect-by-role logic.
+        redirectTo: `${appBaseUrl}/login`,
         queryParams: {
           access_type: 'offline',
           prompt: 'consent',
@@ -249,6 +276,15 @@ const LoginPage = () => {
   const handleEmailLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (loading) return;
+    if (!SUPABASE_CONFIGURED) {
+      sileoToast.error({
+        title: 'Missing configuration',
+        description:
+          SUPABASE_INIT_ERROR ||
+          'Supabase environment variables are not available in this deployment.',
+      });
+      return;
+    }
     const formData = new FormData(e.currentTarget);
     const email = formData.get('email') as string;
     const password = formData.get('password') as string;
@@ -364,6 +400,29 @@ const LoginPage = () => {
             d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
           />
         </svg>
+      </main>
+    );
+  }
+
+  if (!SUPABASE_CONFIGURED) {
+    return (
+      <main className="min-h-screen flex items-center justify-center px-6">
+        <div className="card-glow rounded-2xl p-8 text-center max-w-xl w-full">
+          <h1 className="text-2xl font-bold text-theme mb-2">
+            Missing Supabase Configuration
+          </h1>
+          <p className="text-muted-theme text-sm">
+            This deployment is missing or has invalid{' '}
+            <code>NEXT_PUBLIC_SUPABASE_URL</code> and/or{' '}
+            <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code>.
+          </p>
+          {SUPABASE_INIT_ERROR && (
+            <p className="text-red-400 text-sm mt-2">{SUPABASE_INIT_ERROR}</p>
+          )}
+          <p className="text-muted-theme text-sm mt-2">
+            Add the env vars in Vercel for Production, then redeploy.
+          </p>
+        </div>
       </main>
     );
   }
