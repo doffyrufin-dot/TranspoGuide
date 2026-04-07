@@ -1,18 +1,16 @@
 ﻿'use client';
 
-import React, { useState, useEffect, useMemo, ElementType } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, ElementType } from 'react';
 import { createPortal } from 'react-dom';
 import dynamic from 'next/dynamic';
 import 'leaflet/dist/leaflet.css';
-import type {
-  MapContainerProps,
-  TileLayerProps,
-  MarkerProps,
-  PopupProps,
-} from 'react-leaflet';
+import type { AuthChangeEvent, RealtimeChannel, Session } from '@supabase/supabase-js';
 import { supabase } from '@/utils/supabase/client';
 import { useTheme } from '@/components/ThemeProvider';
 import sileoToast from '@/lib/utils/sileo-toast';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   fetchOperatorBoardingPassengers,
   fetchOperatorChatConversations,
@@ -58,20 +56,20 @@ import {
   Smile,
 } from 'lucide-react';
 
-const LeafletMapContainer = dynamic<MapContainerProps>(
-  () => import('react-leaflet').then((m) => m.MapContainer),
+const LeafletMapContainer = dynamic<any>(
+  () => import('react-leaflet').then((m) => m.MapContainer as any),
   { ssr: false }
 );
-const LeafletTileLayer = dynamic<TileLayerProps>(
-  () => import('react-leaflet').then((m) => m.TileLayer),
+const LeafletTileLayer = dynamic<any>(
+  () => import('react-leaflet').then((m) => m.TileLayer as any),
   { ssr: false }
 );
-const LeafletMarker = dynamic<MarkerProps>(
-  () => import('react-leaflet').then((m) => m.Marker),
+const LeafletMarker = dynamic<any>(
+  () => import('react-leaflet').then((m) => m.Marker as any),
   { ssr: false }
 );
-const LeafletPopup = dynamic<PopupProps>(
-  () => import('react-leaflet').then((m) => m.Popup),
+const LeafletPopup = dynamic<any>(
+  () => import('react-leaflet').then((m) => m.Popup as any),
   { ssr: false }
 );
 
@@ -82,6 +80,10 @@ const isAbortLikeError = (error: unknown) => {
   const message = (e.message || '').toLowerCase();
   return name.includes('abort') || message.includes('aborted');
 };
+
+const CHAT_UNREAD_REFRESH_MS = 30000;
+const CHAT_LIST_REFRESH_MS = 10000;
+const CHAT_THREAD_REFRESH_MS = 10000;
 
 type DashboardNotification = {
   id: string;
@@ -189,6 +191,30 @@ export default function OperatorDashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(
+      (_event: AuthChangeEvent, session: Session | null) => {
+      if (session?.access_token) {
+        setSessionToken(session.access_token);
+        setOperatorUserId(session.user?.id || '');
+        return;
+      }
+
+      if (_event === 'SIGNED_OUT') {
+        setSessionToken('');
+        setOperatorUserId('');
+        window.location.replace('/login');
+      }
+      }
+    );
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     window.location.replace('/login');
@@ -199,7 +225,7 @@ export default function OperatorDashboard() {
     setIsSidebarOpen(false);
   };
 
-  const loadNotifications = async (silent = false) => {
+  const loadNotifications = useCallback(async (silent = false) => {
     if (!sessionToken) return;
     try {
       const res = await fetch('/api/operator/notifications', {
@@ -219,7 +245,7 @@ export default function OperatorDashboard() {
     } catch {
       // silent fail for bell data
     }
-  };
+  }, [sessionToken, notifOpen]);
 
   useEffect(() => {
     if (!sessionToken) return;
@@ -228,8 +254,41 @@ export default function OperatorDashboard() {
       void loadNotifications(true);
     }, 30000);
     return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionToken, notifOpen]);
+  }, [sessionToken, notifOpen, loadNotifications]);
+
+  useEffect(() => {
+    if (!sessionToken || !operatorUserId) return;
+
+    let refreshTimeout: number | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimeout) return;
+      refreshTimeout = window.setTimeout(() => {
+        refreshTimeout = null;
+        void loadNotifications(true);
+      }, 250);
+    };
+
+    const notificationsChannel = supabase
+      .channel(`operator-notifications-${operatorUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_reservations',
+          filter: `operator_user_id=eq.${operatorUserId}`,
+        },
+        scheduleRefresh
+      )
+      .subscribe();
+
+    return () => {
+      if (refreshTimeout) {
+        window.clearTimeout(refreshTimeout);
+      }
+      void supabase.removeChannel(notificationsChannel);
+    };
+  }, [sessionToken, operatorUserId, loadNotifications]);
 
   const formatNotifTime = (value: string) => {
     const date = new Date(value);
@@ -240,7 +299,13 @@ export default function OperatorDashboard() {
   const renderContent = () => {
       switch (activeView) {
       case 'Reservations': return <ReservationsContent accessToken={sessionToken} />;
-      case 'Passengers': return <PassengersContent accessToken={sessionToken} />;
+      case 'Passengers':
+        return (
+          <PassengersContent
+            accessToken={sessionToken}
+            operatorUserId={operatorUserId}
+          />
+        );
       case 'MyVehicle':
         return (
           <MyVehicleContent
@@ -426,48 +491,56 @@ export default function OperatorDashboard() {
               </button>
 
               {notifOpen && (
-                <div
-                  className="absolute right-0 top-11 w-[320px] max-h-[380px] overflow-y-auto rounded-2xl z-[220]"
-                  style={{
-                    background: 'var(--tg-card)',
-                    border: '1px solid var(--tg-border)',
-                    boxShadow: 'var(--tg-shadow)',
-                  }}
-                >
+                <>
+                  <button
+                    type="button"
+                    aria-label="Close notifications"
+                    onClick={() => setNotifOpen(false)}
+                    className="sm:hidden fixed inset-0 z-[210] bg-black/25"
+                  />
                   <div
-                    className="px-4 py-3 text-sm font-semibold text-theme"
-                    style={{ borderBottom: '1px solid var(--tg-border)' }}
+                    className="fixed left-3 right-3 top-[72px] max-h-[65vh] overflow-y-auto rounded-2xl z-[220] sm:absolute sm:left-auto sm:right-0 sm:top-11 sm:w-[320px] sm:max-h-[380px]"
+                    style={{
+                      background: 'var(--tg-card)',
+                      border: '1px solid var(--tg-border)',
+                      boxShadow: 'var(--tg-shadow)',
+                    }}
                   >
-                    Notifications
+                    <div
+                      className="px-4 py-3 text-sm font-semibold text-theme"
+                      style={{ borderBottom: '1px solid var(--tg-border)' }}
+                    >
+                      Notifications
+                    </div>
+                    <div className="p-2">
+                      {notifications.length === 0 ? (
+                        <p className="px-2 py-3 text-sm text-muted-theme">
+                          No notifications.
+                        </p>
+                      ) : (
+                        notifications.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              setActiveView('Reservations');
+                              setNotifOpen(false);
+                              setNotifUnreadCount(0);
+                            }}
+                            className="w-full text-left p-2 rounded-xl mb-1 transition cursor-pointer hover:bg-[var(--tg-subtle)]"
+                            style={{ background: 'var(--tg-bg-alt)' }}
+                          >
+                            <p className="text-sm font-semibold text-theme">{item.title}</p>
+                            <p className="text-xs text-muted-theme">{item.description}</p>
+                            <p className="text-[11px] text-muted-theme mt-1">
+                              {formatNotifTime(item.created_at)}
+                            </p>
+                          </button>
+                        ))
+                      )}
+                    </div>
                   </div>
-                  <div className="p-2">
-                    {notifications.length === 0 ? (
-                      <p className="px-2 py-3 text-sm text-muted-theme">
-                        No notifications.
-                      </p>
-                    ) : (
-                      notifications.map((item) => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => {
-                            setActiveView('Reservations');
-                            setNotifOpen(false);
-                            setNotifUnreadCount(0);
-                          }}
-                          className="w-full text-left p-2 rounded-xl mb-1 transition cursor-pointer hover:bg-[var(--tg-subtle)]"
-                          style={{ background: 'var(--tg-bg-alt)' }}
-                        >
-                          <p className="text-sm font-semibold text-theme">{item.title}</p>
-                          <p className="text-xs text-muted-theme">{item.description}</p>
-                          <p className="text-[11px] text-muted-theme mt-1">
-                            {formatNotifTime(item.created_at)}
-                          </p>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </div>
+                </>
               )}
             </div>
             <div className="flex items-center gap-3 pl-3 md:pl-4" style={{ borderLeft: '1px solid var(--tg-border)' }}>
@@ -536,12 +609,9 @@ function SidebarItem({ icon: Icon, label, active, collapsed, onClick }: {
 }
 
 function OperatorChatWidget({ accessToken }: { accessToken: string }) {
-  const CHAT_PAGE_SIZE = 20;
   const CHAT_RENDER_LIMIT = 160;
   const [chatOpen, setChatOpen] = useState(false);
   const [chatReservationId, setChatReservationId] = useState('');
-  const [chatSearch, setChatSearch] = useState('');
-  const [chatPage, setChatPage] = useState(1);
   const [chatMessages, setChatMessages] = useState<OperatorReservationMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
@@ -550,9 +620,14 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [mounted, setMounted] = useState(false);
   const [unreadThreadCount, setUnreadThreadCount] = useState(0);
+  const [unreadByReservation, setUnreadByReservation] = useState<Record<string, number>>({});
   const [pendingReservations, setPendingReservations] = useState<OperatorReservationRecord[]>([]);
   const [pastReservations, setPastReservations] = useState<OperatorReservationRecord[]>([]);
   const chatBodyRef = React.useRef<HTMLDivElement | null>(null);
+  const chatRealtimeRef = React.useRef<RealtimeChannel | null>(null);
+  const unreadRealtimeRef = React.useRef<RealtimeChannel | null>(null);
+  const chatOpenRef = React.useRef(false);
+  const activeReservationRef = React.useRef('');
   const quickEmojis = ['😀', '😁', '😂', '😊', '😍', '👍', '🙏', '❤️'];
 
   const mergeMessages = (
@@ -577,39 +652,46 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     [...pendingReservations, ...eligibleHistory].forEach((row) => {
       byId.set(row.id, row);
     });
-    return [...byId.values()].sort(
-      (a, b) =>
-        new Date(b.paid_at || b.created_at).getTime() -
-        new Date(a.paid_at || a.created_at).getTime()
-    );
+    return [...byId.values()].sort((a, b) => {
+      const aTime = new Date(
+        a.latest_message_at || a.paid_at || a.created_at
+      ).getTime();
+      const bTime = new Date(
+        b.latest_message_at || b.paid_at || b.created_at
+      ).getTime();
+      return bTime - aTime;
+    });
   }, [pendingReservations, pastReservations]);
 
   const selectedChatReservation = useMemo(
     () => allReservations.find((r) => r.id === chatReservationId) || null,
     [allReservations, chatReservationId]
   );
-  const filteredReservations = useMemo(() => {
-    const q = chatSearch.trim().toLowerCase();
-    if (!q) return allReservations;
-    return allReservations.filter((r) => {
-      const name = String(r.full_name || '').toLowerCase();
-      const route = String(r.route || '').toLowerCase();
-      const status = String(r.status || '').toLowerCase();
-      return name.includes(q) || route.includes(q) || status.includes(q);
-    });
-  }, [allReservations, chatSearch]);
-  const totalChatPages = Math.max(
-    1,
-    Math.ceil(filteredReservations.length / CHAT_PAGE_SIZE)
-  );
-  const pagedReservations = useMemo(() => {
-    const start = (chatPage - 1) * CHAT_PAGE_SIZE;
-    return filteredReservations.slice(start, start + CHAT_PAGE_SIZE);
-  }, [filteredReservations, chatPage, CHAT_PAGE_SIZE]);
   const renderedChatMessages = useMemo(() => {
     if (chatMessages.length <= CHAT_RENDER_LIMIT) return chatMessages;
     return chatMessages.slice(-CHAT_RENDER_LIMIT);
   }, [chatMessages, CHAT_RENDER_LIMIT]);
+
+  const formatRelativeTime = (value?: string | null) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    const diffMs = Date.now() - date.getTime();
+    const diffMin = Math.max(1, Math.floor(diffMs / 60000));
+    if (diffMin < 60) return `${diffMin}m`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h`;
+    const diffDay = Math.floor(diffHr / 24);
+    return `${diffDay}d`;
+  };
+
+  const getInitials = (name?: string | null) => {
+    const raw = String(name || '').trim();
+    if (!raw) return 'P';
+    const parts = raw.split(/\s+/).filter(Boolean);
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase();
+  };
 
   const loadReservations = async (silent = false) => {
     if (!accessToken) return;
@@ -635,6 +717,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     try {
       const result = await fetchOperatorUnreadChatCount(accessToken);
       setUnreadThreadCount(Number(result.unreadThreadCount || 0));
+      setUnreadByReservation(result.unreadByReservation || {});
     } catch {
       if (!silent) {
         sileoToast.error({
@@ -701,6 +784,16 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
           [savedMessage]
         )
       );
+      if (chatRealtimeRef.current) {
+        await chatRealtimeRef.current.send({
+          type: 'broadcast',
+          event: 'new-message',
+          payload: {
+            reservationId: chatReservationId,
+            message: savedMessage,
+          },
+        });
+      }
       setShowEmojiPicker(false);
     } catch (error: any) {
       setChatMessages((prev) => prev.filter((m) => m.id !== tempId));
@@ -724,7 +817,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     if (chatOpen) return;
     const timer = window.setInterval(() => {
       void loadUnreadCount(true);
-    }, 15000);
+    }, CHAT_UNREAD_REFRESH_MS);
     return () => {
       window.clearInterval(timer);
     };
@@ -734,8 +827,14 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   useEffect(() => {
     if (!chatOpen) return;
     void loadReservations(false);
-    setUnreadThreadCount(0);
-    return undefined;
+    void loadUnreadCount(true);
+    const timer = window.setInterval(() => {
+      void loadReservations(true);
+      void loadUnreadCount(true);
+    }, CHAT_LIST_REFRESH_MS);
+    return () => {
+      window.clearInterval(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatOpen, accessToken]);
 
@@ -747,53 +846,57 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     }
     const currentExists = allReservations.some((r) => r.id === chatReservationId);
     if (!currentExists) {
-      setChatReservationId(allReservations[0].id);
+      setChatReservationId('');
+      setChatMessages([]);
     }
   }, [allReservations, chatReservationId]);
-
-  useEffect(() => {
-    setChatPage(1);
-  }, [chatSearch]);
-
-  useEffect(() => {
-    if (chatPage > totalChatPages) {
-      setChatPage(totalChatPages);
-    }
-  }, [chatPage, totalChatPages]);
-
-  useEffect(() => {
-    if (!chatReservationId || !filteredReservations.length) return;
-    const idx = filteredReservations.findIndex((row) => row.id === chatReservationId);
-    if (idx < 0) return;
-    const targetPage = Math.floor(idx / CHAT_PAGE_SIZE) + 1;
-    if (targetPage !== chatPage) {
-      setChatPage(targetPage);
-    }
-  }, [chatReservationId, filteredReservations, chatPage, CHAT_PAGE_SIZE]);
 
   useEffect(() => {
     if (!chatOpen || !chatReservationId) return;
     void loadChat(chatReservationId, { silent: false });
 
     const channel = supabase
-      .channel(`operator-res-chat-${chatReservationId}`)
+      .channel(`reservation-chat-${chatReservationId}`, {
+        config: { broadcast: { self: false } },
+      })
       .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'tbl_reservation_messages',
-          filter: `reservation_id=eq.${chatReservationId}`,
-        },
-        (payload: { new: unknown }) => {
-          const row = payload.new as OperatorReservationMessage;
+        'broadcast',
+        { event: 'new-message' },
+        (payload: {
+          payload?: {
+            reservationId?: string;
+            message?: OperatorReservationMessage;
+          };
+        }) => {
+          const incomingReservationId = (
+            payload?.payload?.reservationId || ''
+          ).trim();
+          if (incomingReservationId !== chatReservationId) return;
+          const row = payload?.payload?.message;
+          if (!row?.id) return;
           setChatMessages((prev) => mergeMessages(prev, [row]));
         }
       )
       .subscribe();
 
+    chatRealtimeRef.current = channel;
+
     return () => {
+      if (chatRealtimeRef.current === channel) {
+        chatRealtimeRef.current = null;
+      }
       void supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatOpen, chatReservationId, accessToken]);
+
+  useEffect(() => {
+    if (!chatOpen || !chatReservationId || !accessToken) return;
+    const timer = window.setInterval(() => {
+      void loadChat(chatReservationId, { silent: true });
+    }, CHAT_THREAD_REFRESH_MS);
+    return () => {
+      window.clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatOpen, chatReservationId, accessToken]);
@@ -803,259 +906,473 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   }, [chatOpen]);
 
   useEffect(() => {
+    chatOpenRef.current = chatOpen;
+  }, [chatOpen]);
+
+  useEffect(() => {
+    activeReservationRef.current = chatReservationId;
+  }, [chatReservationId]);
+
+  useEffect(() => {
     if (!chatOpen) return;
     const el = chatBodyRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [renderedChatMessages, chatOpen]);
 
+  useEffect(() => {
+    if (!accessToken) return;
+
+    const channel = supabase
+      .channel(`operator-chat-unread-${Date.now()}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'tbl_reservation_messages',
+          filter: 'sender_type=eq.passenger',
+        },
+        (payload: { new: Record<string, unknown> }) => {
+          const row = payload.new as {
+            id?: string;
+            reservation_id?: string;
+            sender_type?: 'passenger' | 'operator';
+            sender_name?: string | null;
+            message?: string | null;
+            created_at?: string;
+          };
+
+          const reservationId = String(row.reservation_id || '').trim();
+          if (!reservationId) return;
+
+          if (
+            chatOpenRef.current &&
+            activeReservationRef.current &&
+            activeReservationRef.current === reservationId &&
+            row.id &&
+            row.message &&
+            row.created_at
+          ) {
+            const messageId = String(row.id);
+            const messageText = String(row.message);
+            const createdAt = String(row.created_at);
+            const senderName = row.sender_name ? String(row.sender_name) : 'Passenger';
+            setChatMessages((prev) =>
+              mergeMessages(prev, [
+                {
+                  id: messageId,
+                  sender_type: 'passenger',
+                  sender_name: senderName,
+                  message: messageText,
+                  created_at: createdAt,
+                },
+              ])
+            );
+          }
+
+          setUnreadByReservation((prev) => {
+            const currentUnread = Number(prev[reservationId] || 0);
+            const next = { ...prev, [reservationId]: currentUnread + 1 };
+            if (currentUnread === 0) {
+              setUnreadThreadCount((count) => count + 1);
+            }
+            return next;
+          });
+
+          void loadUnreadCount(true);
+          if (chatOpenRef.current) {
+            void loadReservations(true);
+          }
+        }
+      )
+      .subscribe();
+
+    unreadRealtimeRef.current = channel;
+
+    return () => {
+      if (unreadRealtimeRef.current === channel) {
+        unreadRealtimeRef.current = null;
+      }
+      void supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken]);
+
   if (!mounted) return null;
 
   return createPortal(
     <>
-      <button
-        onClick={() =>
-          setChatOpen((prev) => {
-            const next = !prev;
-            if (next) setUnreadThreadCount(0);
-            return next;
-          })
-        }
-        className="fixed z-[200] w-14 h-14 rounded-full flex items-center justify-center shadow-lg transition hover:scale-105 cursor-pointer relative"
-        style={{
-          position: 'fixed',
-          right: '16px',
-          bottom: '16px',
-          background: 'var(--primary)',
-          color: '#fff',
-        }}
-        title="Open reservation chat"
-      >
-        <MessageCircle size={22} />
-        {unreadThreadCount > 0 && (
-          <span
-            className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full text-[11px] font-bold text-white flex items-center justify-center"
-            style={{ background: '#ef4444', border: '2px solid var(--tg-bg)' }}
-          >
-            {unreadThreadCount > 9 ? '9+' : unreadThreadCount}
-          </span>
-        )}
-      </button>
-
-      {chatOpen && (
-        <div
-          className="fixed z-[190] w-[calc(100vw-2.5rem)] sm:w-[390px] card-glow rounded-2xl p-4 space-y-3"
+      {!chatOpen && (
+        <button
+          onClick={() => {
+            setChatReservationId('');
+            setChatOpen(true);
+          }}
+          className="fixed z-[200] w-14 h-14 rounded-full flex items-center justify-center shadow-lg transition hover:scale-105 cursor-pointer relative"
           style={{
             position: 'fixed',
             right: '16px',
-            bottom: '84px',
-            maxHeight: '70vh',
+            bottom: '16px',
+            background: 'var(--primary)',
+            color: '#fff',
           }}
+          title="Open reservation chat"
         >
-          <div className="flex items-center justify-between gap-3">
-            <h3 className="text-theme font-bold">Passenger Chat</h3>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => void loadReservations(false)}
-                className="px-2 py-1 rounded-md text-[11px] font-semibold transition"
-                style={{
-                  background: 'var(--tg-subtle)',
-                  border: '1px solid var(--tg-border)',
-                  color: 'var(--tg-muted)',
-                }}
-                title="Refresh chat list"
-              >
-                Refresh
-              </button>
-              <button
-                onClick={() => setChatOpen(false)}
-                className="p-1 rounded-md text-muted-theme hover:text-theme"
-                title="Close chat"
-              >
-                <CloseIcon size={16} />
-              </button>
-            </div>
-          </div>
-          <input
-            value={chatSearch}
-            onChange={(e) => setChatSearch(e.target.value)}
-            placeholder="Search passenger or route..."
-            className="input-dark w-full text-xs"
-          />
+          <MessageCircle size={22} />
+          {unreadThreadCount > 0 && (
+            <span
+              className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full text-[11px] font-bold text-white flex items-center justify-center"
+              style={{ background: '#ef4444', border: '2px solid var(--tg-bg)' }}
+            >
+              {unreadThreadCount > 9 ? '9+' : unreadThreadCount}
+            </span>
+          )}
+        </button>
+      )}
 
-          <select
-            value={chatReservationId}
-            onChange={(e) => setChatReservationId(e.target.value)}
-            className="input-dark w-full text-sm"
-            disabled={chatListLoading}
-          >
-            {filteredReservations.length === 0 ? (
-              <option value="">No reservations available</option>
-            ) : (
-              pagedReservations.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.full_name} - {r.route} ({String(r.status || '').toLowerCase()})
-                </option>
-              ))
-            )}
-          </select>
-          {filteredReservations.length > 0 && (
-            <div className="flex items-center justify-between text-[11px] text-muted-theme">
-              <span>
-                {Math.min((chatPage - 1) * CHAT_PAGE_SIZE + 1, filteredReservations.length)}-
-                {Math.min(chatPage * CHAT_PAGE_SIZE, filteredReservations.length)} of{' '}
-                {filteredReservations.length}
-              </span>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => setChatPage((prev) => Math.max(1, prev - 1))}
-                  disabled={chatPage <= 1}
-                  className="px-2 py-1 rounded-md transition disabled:opacity-40 cursor-pointer"
+      {chatOpen && (
+        <>
+          {!selectedChatReservation && (
+            <div
+              className="fixed z-[190] w-[calc(100vw-1rem)] sm:w-[360px] max-w-[360px] flex flex-col overflow-hidden rounded-2xl"
+              style={{
+                position: 'fixed',
+                right: '12px',
+                bottom: '10px',
+                height: 'min(560px, calc(100vh - 20px))',
+                background: 'var(--tg-card)',
+                border: '1px solid var(--tg-border)',
+                boxShadow: 'var(--tg-shadow)',
+              }}
+            >
+              <div
+                className="px-4 py-3 border-b"
+                style={{
+                  borderColor: 'var(--tg-border)',
+                  background: 'var(--tg-bg-alt)',
+                }}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-theme font-semibold leading-none">Passenger Chat</p>
+                    <p className="text-[11px] text-muted-theme mt-1">Realtime conversations</p>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void loadReservations(false)}
+                      title="Refresh chat list"
+                      className="h-8"
+                    >
+                      Refresh
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => {
+                        setChatOpen(false);
+                        setChatReservationId('');
+                      }}
+                      title="Close chat"
+                      className="h-8 w-8"
+                    >
+                      <CloseIcon size={16} />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-3 pt-2 flex-1 min-h-0">
+                <div
+                  className="rounded-xl border h-full flex flex-col overflow-hidden"
                   style={{
-                    background: 'var(--tg-subtle)',
-                    border: '1px solid var(--tg-border)',
+                    borderColor: 'var(--tg-border)',
+                    background: 'var(--tg-bg-alt)',
                   }}
                 >
-                  Prev
-                </button>
-                <span>
-                  {chatPage}/{totalChatPages}
-                </span>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setChatPage((prev) => Math.min(totalChatPages, prev + 1))
-                  }
-                  disabled={chatPage >= totalChatPages}
-                  className="px-2 py-1 rounded-md transition disabled:opacity-40 cursor-pointer"
-                  style={{
-                    background: 'var(--tg-subtle)',
-                    border: '1px solid var(--tg-border)',
-                  }}
-                >
-                  Next
-                </button>
+                  <p
+                    className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wide border-b"
+                    style={{ borderColor: 'var(--tg-border)', color: 'var(--tg-muted)' }}
+                  >
+                    Passenger List
+                  </p>
+                  <ScrollArea className="flex-1 min-h-0">
+                    {chatListLoading && (
+                      <p className="px-3 py-3 text-xs text-muted-theme">Loading conversations...</p>
+                    )}
+                    {!chatListLoading && allReservations.length === 0 && (
+                      <p className="px-3 py-3 text-xs text-muted-theme">
+                        No chat activity for the current boarding queue.
+                      </p>
+                    )}
+                    <div className="space-y-1.5 p-2">
+                      {allReservations.map((r) => {
+                        const unread = Number(unreadByReservation[r.id] || 0);
+                        const isActive = chatReservationId === r.id;
+                        return (
+                          <button
+                            key={r.id}
+                            type="button"
+                            onClick={() => {
+                              setChatReservationId(r.id);
+                              setUnreadByReservation((prev) => ({
+                                ...prev,
+                                [r.id]: 0,
+                              }));
+                              if (unread > 0) {
+                                setUnreadThreadCount((prev) => Math.max(0, prev - 1));
+                              }
+                            }}
+                            className="w-full rounded-xl px-3 py-2 text-left transition cursor-pointer border"
+                            style={{
+                              background: isActive ? 'var(--tg-subtle)' : 'transparent',
+                              borderColor: isActive ? 'var(--primary)' : 'var(--tg-border)',
+                            }}
+                          >
+                            <div className="flex items-start gap-2">
+                              <div
+                                className="w-8 h-8 rounded-full shrink-0 flex items-center justify-center text-[11px] font-bold"
+                                style={{
+                                  background: 'rgba(59,130,246,0.15)',
+                                  color: 'var(--primary)',
+                                  border: '1px solid rgba(59,130,246,0.35)',
+                                }}
+                              >
+                                {getInitials(r.full_name)}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-start justify-between gap-2">
+                                  <p className="text-sm font-semibold text-theme truncate">{r.full_name}</p>
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {unread > 0 && (
+                                      <span
+                                        className="min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold text-white flex items-center justify-center"
+                                        style={{ background: '#ef4444' }}
+                                      >
+                                        {unread > 9 ? '9+' : unread}
+                                      </span>
+                                    )}
+                                    <span className="text-[10px] text-muted-theme">
+                                      {formatRelativeTime(r.latest_message_at || r.paid_at || r.created_at)}
+                                    </span>
+                                  </div>
+                                </div>
+                                <p className="text-[11px] text-muted-theme truncate">{r.route}</p>
+                                <p className="text-[11px] text-muted-theme truncate mt-0.5">
+                                  {r.latest_message
+                                    ? `${r.latest_message_sender === 'operator' ? 'You: ' : ''}${r.latest_message}`
+                                    : 'No messages yet'}
+                                </p>
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </ScrollArea>
+                </div>
               </div>
             </div>
-          )}
-          {chatListLoading && (
-            <p className="text-[11px] text-muted-theme -mt-1">Loading conversations...</p>
           )}
 
           {selectedChatReservation && (
-            <p className="text-xs text-muted-theme">
-              Chatting with:{' '}
-              <span className="text-theme font-semibold">{selectedChatReservation.full_name}</span>
-            </p>
-          )}
-
-          <div
-            ref={chatBodyRef}
-            className="rounded-xl p-3 overflow-y-auto"
-            style={{
-              background: 'var(--tg-bg-alt)',
-              border: '1px solid var(--tg-border)',
-              height: '280px',
-            }}
-          >
-            {chatMessagesLoading ? (
-              <p className="text-sm text-muted-theme">Loading chat...</p>
-            ) : renderedChatMessages.length === 0 ? (
-              <p className="text-sm text-muted-theme">No messages yet.</p>
-            ) : (
-              <div className="space-y-2">
-                {renderedChatMessages.map((msg) => {
-                  const isOperator = msg.sender_type === 'operator';
-                  return (
-                    <div
-                      key={msg.id}
-                      className={`max-w-[88%] rounded-xl px-3 py-2 ${isOperator ? 'ml-auto' : ''}`}
-                      style={{
-                        background: isOperator
-                          ? 'rgba(37,151,233,0.15)'
-                          : 'rgba(255,255,255,0.05)',
-                        border: '1px solid var(--tg-border)',
-                      }}
-                    >
-                      <p className="text-[11px] text-muted-theme font-semibold">
-                        {msg.sender_name || (isOperator ? 'Operator' : 'Passenger')}
-                      </p>
-                      <p className="text-sm text-theme whitespace-pre-wrap">{msg.message}</p>
-                      <p className="text-[10px] text-muted-theme mt-1">
-                        {new Date(msg.created_at).toLocaleString('en-PH')}
-                      </p>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowEmojiPicker((prev) => !prev)}
-                className="p-2 rounded-lg cursor-pointer transition hover:bg-[var(--tg-subtle)]"
+            <div
+              className="fixed z-[195] w-[calc(100vw-1rem)] sm:w-[390px] max-w-[390px] flex flex-col overflow-hidden right-3 bottom-[10px] rounded-[18px]"
+              style={{
+                height: 'min(560px, calc(100vh - 20px))',
+                background: 'var(--tg-bg-alt)',
+                border: '1px solid color-mix(in srgb, var(--tg-border) 80%, #d4d4d8 20%)',
+                boxShadow: '0 18px 48px rgba(0,0,0,0.28)',
+              }}
+            >
+              <div
+                className="h-14 px-3 border-b flex items-center justify-between gap-2"
                 style={{
-                  border: '1px solid var(--tg-border)',
-                  color: 'var(--tg-muted)',
+                  borderColor: 'var(--tg-border)',
+                  background: 'var(--tg-card)',
                 }}
-                title="Add emoji"
               >
-                <Smile size={16} />
-              </button>
-              {showEmojiPicker && (
-                <div
-                  className="absolute bottom-12 right-0 rounded-xl p-2 w-48 z-[210]"
-                  style={{
-                    background: 'var(--tg-card)',
-                    border: '1px solid var(--tg-border)',
-                    boxShadow: 'var(--tg-shadow)',
-                  }}
-                >
-                  <div className="grid grid-cols-4 gap-1">
-                    {quickEmojis.map((emoji) => (
-                      <button
-                        key={emoji}
-                        type="button"
-                        onClick={() => {
-                          setChatInput((prev) => `${prev}${emoji}`);
-                          setShowEmojiPicker(false);
-                        }}
-                        className="text-lg p-1 rounded-md hover:bg-[var(--tg-subtle)] transition cursor-pointer"
-                        title={emoji}
-                      >
-                        {emoji}
-                      </button>
-                    ))}
+                <div className="flex items-center gap-2 min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => setChatReservationId('')}
+                    className="h-8 w-8 rounded-full flex items-center justify-center cursor-pointer transition hover:bg-[var(--tg-subtle)] shrink-0"
+                    title="Back to list"
+                    style={{ color: 'var(--primary)' }}
+                  >
+                    <ChevronsLeft size={16} />
+                  </button>
+                  <div
+                    className="w-8 h-8 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold"
+                    style={{
+                      background: 'rgba(59,130,246,0.15)',
+                      color: 'var(--primary)',
+                      border: '1px solid rgba(59,130,246,0.35)',
+                    }}
+                  >
+                    {getInitials(selectedChatReservation.full_name)}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm text-theme font-semibold truncate max-w-[180px]">
+                      {selectedChatReservation.full_name}
+                    </p>
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className="w-2 h-2 rounded-full"
+                        style={{ background: 'var(--primary)' }}
+                      />
+                      <span className="text-[11px] text-muted-theme">Online</span>
+                    </div>
                   </div>
                 </div>
-              )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setChatOpen(false);
+                    setChatReservationId('');
+                  }}
+                  title="Close chat"
+                  className="h-8 w-8 rounded-full flex items-center justify-center cursor-pointer transition hover:bg-[var(--tg-subtle)] shrink-0"
+                  style={{ color: 'var(--tg-muted)' }}
+                >
+                  <CloseIcon size={17} />
+                </button>
+              </div>
+
+              <div
+                className="flex-1 min-h-0 px-3 py-3"
+                style={{ background: 'var(--tg-bg)' }}
+              >
+                <ScrollArea
+                  ref={chatBodyRef}
+                  className="h-full rounded-xl p-2.5"
+                  style={{
+                    background: 'color-mix(in srgb, var(--tg-bg-alt) 90%, #f1f5f9 10%)',
+                    border: '1px solid var(--tg-border)',
+                  }}
+                >
+                  {chatMessagesLoading ? (
+                    <p className="text-sm text-muted-theme">Loading chat...</p>
+                  ) : renderedChatMessages.length === 0 ? (
+                    <p className="text-sm text-muted-theme">No messages yet.</p>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {renderedChatMessages.map((msg) => {
+                        const isOperator = msg.sender_type === 'operator';
+                        return (
+                          <div
+                            key={msg.id}
+                            className={`flex ${isOperator ? 'justify-end' : 'justify-start'}`}
+                          >
+                            <div
+                              className={`max-w-[84%] rounded-2xl px-3 py-2.5 ${
+                                isOperator ? 'rounded-br-md' : 'rounded-bl-md'
+                              }`}
+                              style={{
+                                background: isOperator ? 'var(--primary)' : 'var(--tg-card)',
+                                color: isOperator ? '#ffffff' : 'var(--tg-text)',
+                                border: isOperator ? '1px solid transparent' : '1px solid var(--tg-border)',
+                              }}
+                            >
+                              <p
+                                className="text-sm whitespace-pre-wrap break-words"
+                                style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}
+                              >
+                                {msg.message}
+                              </p>
+                              <p
+                                className="text-[10px] mt-1"
+                                style={{ color: isOperator ? 'rgba(255,255,255,0.78)' : 'var(--tg-muted)' }}
+                              >
+                                {new Date(msg.created_at).toLocaleString('en-PH')}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </ScrollArea>
+              </div>
+
+              <div
+                className="px-2.5 py-2 border-t"
+                style={{ borderColor: 'var(--tg-border)', background: 'var(--tg-card)' }}
+              >
+                <div className="flex items-center gap-1.5">
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setShowEmojiPicker((prev) => !prev)}
+                      title="Add emoji"
+                      className="h-9 w-9 rounded-full flex items-center justify-center cursor-pointer transition hover:bg-[var(--tg-subtle)]"
+                      style={{ color: 'var(--primary)' }}
+                    >
+                      <Smile size={16} />
+                    </button>
+                    {showEmojiPicker && (
+                      <div
+                        className="absolute bottom-11 left-0 w-48 z-[210] p-2 rounded-xl border"
+                        style={{
+                          background: 'var(--tg-card)',
+                          borderColor: 'var(--tg-border)',
+                          boxShadow: 'var(--tg-shadow)',
+                        }}
+                      >
+                        <div className="grid grid-cols-4 gap-1">
+                          {quickEmojis.map((emoji) => (
+                            <button
+                              key={emoji}
+                              type="button"
+                              onClick={() => {
+                                setChatInput((prev) => `${prev}${emoji}`);
+                                setShowEmojiPicker(false);
+                              }}
+                              className="text-lg p-1 rounded-md hover:bg-[var(--tg-subtle)] transition cursor-pointer"
+                              title={emoji}
+                            >
+                              {emoji}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <Input
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void handleSendChat();
+                      }
+                    }}
+                    placeholder="Aa"
+                    className="flex-1 h-10 rounded-full border text-sm"
+                    style={{
+                      borderColor: 'var(--tg-border)',
+                      background: 'var(--tg-bg-alt)',
+                    }}
+                    disabled={!chatReservationId}
+                  />
+
+                  <button
+                    onClick={() => void handleSendChat()}
+                    disabled={!chatReservationId || !chatInput.trim() || chatSending}
+                    className="h-9 w-9 rounded-full flex items-center justify-center cursor-pointer transition disabled:opacity-50"
+                    style={{ background: 'var(--primary)', color: '#fff' }}
+                    title="Send"
+                  >
+                    <SendHorizontal size={16} />
+                  </button>
+                </div>
+              </div>
             </div>
-            <input
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  void handleSendChat();
-                }
-              }}
-              placeholder="Type message..."
-              className="input-dark flex-1 text-sm"
-              disabled={!chatReservationId}
-            />
-            <button
-              onClick={handleSendChat}
-              disabled={!chatReservationId || !chatInput.trim() || chatSending}
-              className="btn-primary px-3 disabled:opacity-50"
-            >
-              <SendHorizontal size={15} />
-            </button>
-          </div>
-        </div>
+          )}
+        </>
       )}
     </>,
     document.body
@@ -1359,7 +1676,13 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
   );
 }
 
-function PassengersContent({ accessToken }: { accessToken: string }) {
+function PassengersContent({
+  accessToken,
+  operatorUserId,
+}: {
+  accessToken: string;
+  operatorUserId: string;
+}) {
   const [loading, setLoading] = useState(true);
   const [queueInfo, setQueueInfo] = useState<OperatorBoardingQueueInfo | null>(null);
   const [passengers, setPassengers] = useState<OperatorBoardingPassenger[]>([]);
@@ -1415,7 +1738,7 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
     return [lat, lng];
   };
 
-  const loadPassengers = async (silent = false) => {
+  const loadPassengers = useCallback(async (silent = false) => {
     if (!accessToken) return;
     try {
       if (!silent) setLoading(true);
@@ -1434,12 +1757,60 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
     } finally {
       if (!silent) setLoading(false);
     }
-  };
+  }, [accessToken]);
 
   useEffect(() => {
     void loadPassengers(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessToken]);
+  }, [loadPassengers]);
+
+  useEffect(() => {
+    if (!accessToken || !operatorUserId) return;
+
+    let refreshTimeout: number | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimeout) return;
+      refreshTimeout = window.setTimeout(() => {
+        refreshTimeout = null;
+        void loadPassengers(true);
+      }, 250);
+    };
+
+    const reservationsChannel = supabase
+      .channel(`operator-passengers-res-${operatorUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_reservations',
+          filter: `operator_user_id=eq.${operatorUserId}`,
+        },
+        scheduleRefresh
+      )
+      .subscribe();
+
+    const queueChannel = supabase
+      .channel(`operator-passengers-queue-${operatorUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_van_queue',
+          filter: `operator_user_id=eq.${operatorUserId}`,
+        },
+        scheduleRefresh
+      )
+      .subscribe();
+
+    return () => {
+      if (refreshTimeout) {
+        window.clearTimeout(refreshTimeout);
+      }
+      void supabase.removeChannel(reservationsChannel);
+      void supabase.removeChannel(queueChannel);
+    };
+  }, [accessToken, operatorUserId, loadPassengers]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1527,9 +1898,9 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
       <div className="card-glow p-5 rounded-2xl">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 className="text-theme font-bold text-lg">Boarding Passengers</h3>
+            <h3 className="text-theme font-bold text-lg">Queue Passengers</h3>
             <p className="text-muted-theme text-sm">
-              Latest reservations for your current boarding van
+              Latest reservations for your current queued or boarding van
             </p>
           </div>
           <button
@@ -1580,7 +1951,7 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
             className="mt-4 p-4 rounded-xl text-sm"
             style={{ background: 'rgba(245,158,11,0.12)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.35)' }}
           >
-            You are not in boarding status yet. Set your queue status to Boarding in My Vehicle tab.
+            You are not in queue yet. Set your queue status to Queued or Boarding in My Vehicle tab.
           </div>
         )}
       </div>
@@ -1617,13 +1988,13 @@ function PassengersContent({ accessToken }: { accessToken: string }) {
               ) : !queueInfo ? (
                 <tr>
                   <td className="p-6 text-muted-theme" colSpan={5}>
-                    No active boarding van.
+                    No active queued/boarding van.
                   </td>
                 </tr>
               ) : passengers.length === 0 ? (
                 <tr>
                   <td className="p-6 text-muted-theme" colSpan={5}>
-                    No passengers yet for this boarding trip.
+                    No passengers yet for this queued/boarding trip.
                   </td>
                 </tr>
               ) : (
@@ -2256,7 +2627,14 @@ function MyVehicleContent({
                 </button>
               )}
               <button
-                onClick={() => runQueueAction('leave', 'Removed from queue')}
+                onClick={() =>
+                  runQueueAction(
+                    'leave',
+                    myQueue?.status === 'boarding'
+                      ? 'Trip marked as departed'
+                      : 'Removed from queue'
+                  )
+                }
                 disabled={actionLoading || queueLoading}
                 className="px-4 py-2 rounded-xl text-sm font-semibold cursor-pointer"
                 style={{
@@ -2265,7 +2643,7 @@ function MyVehicleContent({
                   border: '1px solid rgba(239,68,68,0.35)',
                 }}
               >
-                Leave Queue
+                {myQueue?.status === 'boarding' ? 'Mark Departed' : 'Leave Queue'}
               </button>
             </>
           )}

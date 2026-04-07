@@ -4,7 +4,13 @@ import { listReservationsByOperator } from '@/lib/db/reservations';
 
 const isFinalStatus = (status?: string | null) => {
   const s = (status || '').toLowerCase();
-  return s === 'confirmed' || s === 'cancelled' || s === 'rejected';
+  return (
+    s === 'confirmed' ||
+    s === 'cancelled' ||
+    s === 'rejected' ||
+    s === 'picked_up' ||
+    s === 'departed'
+  );
 };
 
 const isPendingStatus = (status?: string | null) => {

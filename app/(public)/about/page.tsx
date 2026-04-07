@@ -7,6 +7,7 @@ import {
   FaBullseye,
   FaArrowRight,
 } from 'react-icons/fa';
+import { FadeIn, Stagger, StaggerItem } from '@/components/ui/motion';
 
 const STATS = [
   { value: '50+', label: 'Active Routes' },
@@ -31,7 +32,7 @@ const AboutPage = () => {
     <main>
       {/* Hero */}
       <section className="relative pt-40 pb-24 px-6">
-        <div className="max-w-3xl mx-auto text-center" data-aos="fade-up">
+        <FadeIn className="max-w-3xl mx-auto text-center">
           <div className="section-badge mx-auto mb-6">About Us</div>
           <h1 className="text-4xl md:text-5xl font-extrabold text-theme leading-tight">
             Simplifying <span className="text-gradient" style={{ fontStyle: 'italic' }}>Public Transport</span>
@@ -45,12 +46,12 @@ const AboutPage = () => {
               Explore Routes <FaArrowRight className="group-hover:translate-x-1 transition-transform" />
             </a>
           </div>
-        </div>
+        </FadeIn>
       </section>
 
       {/* Stats */}
-      <section className="py-10 px-6" data-aos="fade-up">
-        <div className="max-w-4xl mx-auto card-glow p-6 md:p-8 rounded-2xl">
+      <section className="py-10 px-6">
+        <FadeIn className="max-w-4xl mx-auto card-glow p-6 md:p-8 rounded-2xl">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-8 text-center">
             {STATS.map((s, i) => (
               <div key={i}>
@@ -59,13 +60,13 @@ const AboutPage = () => {
               </div>
             ))}
           </div>
-        </div>
+        </FadeIn>
       </section>
 
       {/* Story */}
       <section className="py-24 px-6">
         <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-14 items-center">
-          <div data-aos="fade-right">
+          <FadeIn className="">
             <div className="section-badge">Our Story</div>
             <h2 className="text-3xl md:text-4xl font-extrabold text-theme mt-3 mb-5">
               Built for <span className="text-gradient" style={{ fontStyle: 'italic' }}>Real Commuters</span>
@@ -76,38 +77,38 @@ const AboutPage = () => {
             <p className="text-muted-theme leading-relaxed">
               With TranspoGuide, exploring new destinations and managing your daily commute has never been easier.
             </p>
-          </div>
-          <div data-aos="fade-left" className="grid grid-cols-1 gap-4">
+          </FadeIn>
+          <Stagger className="grid grid-cols-1 gap-4">
             {TEAM.map((t, i) => (
-              <div key={i} className="card-glow p-5 rounded-2xl flex items-center gap-5 group">
+              <StaggerItem key={i} className="card-glow p-5 rounded-2xl flex items-center gap-5 group">
                 <div className="icon-badge">{t.icon}</div>
                 <div>
                   <h3 className="text-theme font-semibold">{t.name}</h3>
                   <p className="text-muted-theme text-sm mt-0.5">{t.desc}</p>
                 </div>
-              </div>
+              </StaggerItem>
             ))}
-          </div>
+          </Stagger>
         </div>
       </section>
 
       {/* Values */}
       <section className="py-24 px-6">
         <div className="max-w-7xl mx-auto">
-          <div className="text-center mb-14" data-aos="fade-up">
+          <FadeIn className="text-center mb-14">
             <h2 className="text-3xl md:text-4xl font-extrabold text-theme">
               What We <span className="text-gradient" style={{ fontStyle: 'italic' }}>Stand For</span>
             </h2>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          </FadeIn>
+          <Stagger className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {VALUES.map((v, i) => (
-              <div key={i} data-aos="fade-up" data-aos-delay={i * 100} className="card-glow p-8 rounded-2xl text-center group">
+              <StaggerItem key={i} className="card-glow p-8 rounded-2xl text-center group">
                 <div className="icon-badge w-14 h-14 text-2xl mx-auto mb-5">{v.icon}</div>
                 <h3 className="text-theme font-bold text-xl mb-2">{v.title}</h3>
                 <p className="text-muted-theme text-sm leading-relaxed">{v.text}</p>
-              </div>
+              </StaggerItem>
             ))}
-          </div>
+          </Stagger>
         </div>
       </section>
     </main>

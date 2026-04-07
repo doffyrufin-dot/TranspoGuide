@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { markReservationsDepartedForQueue } from '@/lib/db/reservations';
 
 type QueueAction = 'join' | 'leave' | 'boarding';
 
@@ -22,6 +23,153 @@ const toIsoFromTime = (value?: string | null) => {
   if (Number.isNaN(date.getTime())) return null;
   return date.toISOString();
 };
+
+const toTimeLabel = (value?: string | null) => {
+  if (!value) return 'TBD';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString('en-PH', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+async function sendDepartedNotificationEmail(params: {
+  to: string;
+  fullName: string;
+  reservationId: string;
+  route?: string | null;
+  seatLabels?: string[] | null;
+  seatCount?: number | null;
+  operatorName?: string | null;
+  plateNumber?: string | null;
+  departureTime?: string | null;
+}) {
+  const apiKey = (process.env.RESEND_API_KEY || '').trim();
+  if (!apiKey) {
+    return { sent: false as const, reason: 'missing_resend_key' };
+  }
+
+  const useOnboardingFrom = process.env.RESEND_USE_ONBOARDING_FROM === 'true';
+  const configuredFrom = (process.env.RESEND_FROM_EMAIL || '').trim();
+  const primaryFrom =
+    !useOnboardingFrom && configuredFrom
+      ? configuredFrom
+      : 'TranspoGuide <onboarding@resend.dev>';
+  const fallbackFrom = 'TranspoGuide <onboarding@resend.dev>';
+  const appName = (process.env.APP_NAME || 'TranspoGuide').trim();
+
+  const recipient = normalizeEmail(params.to);
+  if (!recipient || !recipient.includes('@')) {
+    return { sent: false as const, reason: 'invalid_recipient_email' };
+  }
+
+  const safeName = params.fullName?.trim() || 'Passenger';
+  const routeText = (params.route || '').trim() || 'N/A';
+  const operatorText = (params.operatorName || '').trim() || 'Operator';
+  const plateText = (params.plateNumber || '').trim() || 'N/A';
+  const departureText = toTimeLabel(params.departureTime);
+  const seatText =
+    Array.isArray(params.seatLabels) && params.seatLabels.length > 0
+      ? params.seatLabels.join(', ')
+      : 'N/A';
+  const seatCountText =
+    typeof params.seatCount === 'number' && Number.isFinite(params.seatCount)
+      ? String(params.seatCount)
+      : Array.isArray(params.seatLabels) && params.seatLabels.length > 0
+        ? String(params.seatLabels.length)
+        : 'N/A';
+
+  const subject = `${appName}: Van Departed`;
+  const html = `
+    <div style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif;color:#0f172a;">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:20px 10px;background:#f1f5f9;">
+        <tr>
+          <td align="center">
+            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
+              <tr>
+                <td style="padding:18px 24px;background:#0b2a52;">
+                  <h1 style="margin:0;font-size:20px;color:#ffffff;">${appName}</h1>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:24px;">
+                  <h2 style="margin:0 0 12px;font-size:24px;color:#0f172a;">Your van has departed</h2>
+                  <p style="margin:0 0 10px;font-size:15px;color:#0f172a;">Hi ${safeName},</p>
+                  <p style="margin:0 0 16px;line-height:1.6;font-size:15px;color:#334155;">
+                    The van assigned to your booking has now departed from the terminal.
+                  </p>
+                  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:0 0 10px;">
+                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Reservation ID:</strong> ${params.reservationId}</td></tr>
+                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Route:</strong> ${routeText}</td></tr>
+                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Operator:</strong> ${operatorText}</td></tr>
+                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Plate Number:</strong> ${plateText}</td></tr>
+                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Departure Time:</strong> ${departureText}</td></tr>
+                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Seat Number(s):</strong> ${seatText}</td></tr>
+                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Seat Count:</strong> ${seatCountText}</td></tr>
+                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Status:</strong> DEPARTED</td></tr>
+                  </table>
+                  <p style="margin:16px 0 0;font-size:13px;color:#475569;">
+                    Keep this email for your trip reference.
+                  </p>
+                  <p style="margin:14px 0 0;font-size:14px;color:#0f172a;">- ${appName} Team</p>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:14px 24px;border-top:1px solid #e2e8f0;background:#f8fafc;color:#64748b;font-size:12px;">
+                  This is an automated email from ${appName}.
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </div>
+  `;
+
+  const sendWithFrom = async (from: string) => {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from,
+        to: [recipient],
+        subject,
+        html,
+      }),
+    });
+
+    if (response.ok) {
+      return { ok: true as const };
+    }
+
+    let reason = `resend_http_${response.status}`;
+    try {
+      const body = (await response.json()) as { message?: string };
+      if (body?.message) reason = String(body.message);
+    } catch {
+      // no-op
+    }
+    return { ok: false as const, reason };
+  };
+
+  const primaryAttempt = await sendWithFrom(primaryFrom);
+  if (primaryAttempt.ok) return { sent: true as const };
+
+  if (primaryFrom !== fallbackFrom) {
+    const fallbackAttempt = await sendWithFrom(fallbackFrom);
+    if (fallbackAttempt.ok) return { sent: true as const, viaFallback: true as const };
+    return {
+      sent: false as const,
+      reason: `${primaryAttempt.reason}; fallback_failed:${fallbackAttempt.reason}`,
+    };
+  }
+
+  return { sent: false as const, reason: primaryAttempt.reason };
+}
 
 async function reorderRoutePositions(serviceClient: any, route: string) {
   const { data: rows, error } = await serviceClient
@@ -133,10 +281,12 @@ export async function POST(request: NextRequest) {
       if (!activeEntry?.id) {
         return NextResponse.json({ ok: true, left: false, queue: null });
       }
+      const isDeparting = String(activeEntry.status || '').toLowerCase() === 'boarding';
+      const nextStatus = isDeparting ? 'departed' : 'cancelled';
       const { error: leaveError } = await serviceClient
         .from('tbl_van_queue')
         .update({
-          status: 'cancelled',
+          status: nextStatus,
           updated_at: new Date().toISOString(),
         })
         .eq('id', activeEntry.id);
@@ -146,10 +296,48 @@ export async function POST(request: NextRequest) {
           { status: 500 }
         );
       }
+
+      if (isDeparting) {
+        const departedResult = await markReservationsDepartedForQueue({
+          queueId: activeEntry.id,
+          operatorUserId: user.id,
+          senderName: operatorName,
+        });
+
+        const reservationsForEmail = departedResult.reservations.filter((row) => {
+          const email = normalizeEmail(row.passenger_email);
+          return !!email && email.includes('@');
+        });
+
+        await Promise.allSettled(
+          reservationsForEmail.map((row) =>
+            sendDepartedNotificationEmail({
+              to: normalizeEmail(row.passenger_email),
+              fullName: row.full_name || 'Passenger',
+              reservationId: row.id,
+              route: row.route || activeEntry.route || '',
+              seatLabels: Array.isArray(row.seat_labels) ? row.seat_labels : [],
+              seatCount:
+                typeof row.seat_count === 'number' && Number.isFinite(row.seat_count)
+                  ? row.seat_count
+                  : null,
+              operatorName,
+              plateNumber: activeEntry.plate_number || '',
+              departureTime: activeEntry.departure_time || null,
+            })
+          )
+        );
+      }
+
       if (activeEntry.route) {
         await reorderRoutePositions(serviceClient, activeEntry.route);
       }
-      return NextResponse.json({ ok: true, left: true, queue: null });
+      return NextResponse.json({
+        ok: true,
+        left: true,
+        departed: isDeparting,
+        queue: null,
+      });
     }
 
     if (action === 'boarding') {

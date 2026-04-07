@@ -8,9 +8,16 @@ type ReservationRow = {
   status: string | null;
 };
 
+type QueueRow = {
+  id: string;
+  status: string | null;
+  updated_at: string | null;
+};
+
 type MessageRow = {
   reservation_id: string;
   sender_type: 'passenger' | 'operator';
+  message?: string | null;
   created_at: string;
 };
 
@@ -114,7 +121,7 @@ export async function GET(req: NextRequest) {
 
     const { data: messageRows, error: messageError } = await serviceClient
       .from('tbl_reservation_messages')
-      .select('reservation_id, sender_type, created_at')
+      .select('reservation_id, sender_type, message, created_at')
       .in('reservation_id', reservationIds)
       .order('created_at', { ascending: false })
       .limit(600);
@@ -126,11 +133,29 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const allMessages = (messageRows || []) as MessageRow[];
     const latestByReservation = new Map<string, MessageRow>();
-    for (const row of (messageRows || []) as MessageRow[]) {
+    const unreadByReservation = new Map<string, number>();
+
+    for (const row of allMessages) {
       if (!latestByReservation.has(row.reservation_id)) {
         latestByReservation.set(row.reservation_id, row);
       }
+      if (unreadByReservation.has(row.reservation_id)) {
+        continue;
+      }
+      unreadByReservation.set(row.reservation_id, 0);
+    }
+
+    // Count newest consecutive passenger messages until first operator reply.
+    for (const reservationId of reservationIds) {
+      let count = 0;
+      for (const row of allMessages) {
+        if (row.reservation_id !== reservationId) continue;
+        if (row.sender_type === 'operator') break;
+        if (row.sender_type === 'passenger') count += 1;
+      }
+      unreadByReservation.set(reservationId, count);
     }
 
     const reservationMap = new Map(
@@ -138,7 +163,10 @@ export async function GET(req: NextRequest) {
     );
 
     const unreadThreads = [...latestByReservation.entries()]
-      .filter(([, message]) => message.sender_type === 'passenger')
+      .filter(([reservationId, message]) => {
+        const unread = Number(unreadByReservation.get(reservationId) || 0);
+        return message.sender_type === 'passenger' && unread > 0;
+      })
       .map(([reservationId, message]) => {
         const reservation = reservationMap.get(reservationId);
         return {
@@ -147,12 +175,14 @@ export async function GET(req: NextRequest) {
           route: reservation?.route || '',
           status: reservation?.status || '',
           latest_at: message.created_at,
+          unread_count: Number(unreadByReservation.get(reservationId) || 0),
         };
       });
 
     return NextResponse.json({
       unreadThreadCount: unreadThreads.length,
       unreadThreads,
+      unreadByReservation: Object.fromEntries(unreadByReservation.entries()),
     });
   } catch (error: any) {
     return NextResponse.json(

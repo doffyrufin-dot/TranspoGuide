@@ -1,8 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 
 export interface CreateReservationIntentInput {
   fullName: string;
+  passengerEmail: string;
   contactNumber: string;
   pickupLocation: string;
   route: string;
@@ -16,6 +17,29 @@ export interface CreateReservationIntentInput {
 const createGuestToken = () => randomBytes(24).toString('hex');
 
 const LOCK_MINUTES = Number(process.env.SEAT_LOCK_MINUTES || '5');
+const AUTO_PAYMENT_PREFIX = 'Payment completed. Payment Reference: ';
+const AUTO_DEPARTED_MESSAGE =
+  'Van update: This trip has departed from the terminal.';
+
+const buildAutoPaymentMessageId = (reservationId: string) => {
+  const hash = createHash('sha256')
+    .update(`auto-payment:${reservationId}`)
+    .digest('hex');
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(
+    12,
+    16
+  )}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+};
+
+const buildAutoDepartedMessageId = (reservationId: string) => {
+  const hash = createHash('sha256')
+    .update(`auto-departed:${reservationId}`)
+    .digest('hex');
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(
+    12,
+    16
+  )}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+};
 
 const getServiceClient = () => {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -32,41 +56,111 @@ const getServiceClient = () => {
 const lockExpiresAtIso = () =>
   new Date(Date.now() + LOCK_MINUTES * 60 * 1000).toISOString();
 
+const isSeatLockActive = (
+  row: { status?: string | null; expires_at?: string | null },
+  nowIso: string
+) => {
+  const status = String(row.status || '').toLowerCase();
+  if (status === 'reserved') return true;
+  if (status !== 'locked') return false;
+  return !!row.expires_at && row.expires_at > nowIso;
+};
+
+const cleanupExpiredLockedSeatRows = async (input: {
+  supabase: any;
+  tripKey: string;
+  seatLabels: string[];
+  nowIso: string;
+}) => {
+  if (input.seatLabels.length === 0) return;
+  const { error } = await input.supabase
+    .from('tbl_seat_locks')
+    .delete()
+    .eq('trip_key', input.tripKey)
+    .eq('status', 'locked')
+    .lt('expires_at', input.nowIso)
+    .in('seat_label', input.seatLabels);
+
+  if (error) {
+    throw new Error(error.message || 'Failed to clean expired seat locks.');
+  }
+};
+
 export async function createReservationIntent(input: CreateReservationIntentInput) {
   const supabase = getServiceClient();
-  const seatLabels = input.seatLabels.map((s) => s.trim()).filter(Boolean);
+  const seatLabels = Array.from(
+    new Set(input.seatLabels.map((s) => s.trim()).filter(Boolean))
+  );
   if (seatLabels.length === 0) {
     throw new Error('Please select at least one seat.');
   }
 
   const nowIso = new Date().toISOString();
-  await supabase
+  const { data: seatLockRows, error: lockFetchError } = await supabase
     .from('tbl_seat_locks')
-    .delete()
-    .lt('expires_at', nowIso)
-    .eq('status', 'locked');
-
-  const { data: activeLocks, error: lockFetchError } = await supabase
-    .from('tbl_seat_locks')
-    .select('seat_label')
+    .select('reservation_id, seat_label, status, expires_at')
     .eq('trip_key', input.tripKey)
-    .eq('status', 'locked')
-    .in('seat_label', seatLabels)
-    .gt('expires_at', nowIso);
+    .in('status', ['locked', 'reserved'])
+    .in('seat_label', seatLabels);
 
   if (lockFetchError) {
     throw new Error(lockFetchError.message || 'Failed to check seat locks.');
   }
 
-  if ((activeLocks || []).length > 0) {
-    const locked = (activeLocks || []).map((l: any) => l.seat_label).join(', ');
-    throw new Error(`Seat(s) already locked: ${locked}`);
+  let relevantActiveLocks = (seatLockRows || []).filter((row) =>
+    isSeatLockActive(row, nowIso)
+  );
+  if (input.queueId && relevantActiveLocks.length > 0) {
+    const reservationIds = Array.from(
+      new Set(
+        relevantActiveLocks
+          .map((row) => row.reservation_id)
+          .filter((id): id is string => !!id)
+      )
+    );
+
+    if (reservationIds.length > 0) {
+      const { data: reservationRows, error: reservationFilterError } = await supabase
+        .from('tbl_reservations')
+        .select('id')
+        .in('id', reservationIds)
+        .eq('queue_id', input.queueId);
+
+      if (reservationFilterError) {
+        throw new Error(
+          reservationFilterError.message || 'Failed to filter active seat locks.'
+        );
+      }
+
+      const relevantReservationIds = new Set(
+        (reservationRows || []).map((row) => row.id).filter(Boolean)
+      );
+      relevantActiveLocks = relevantActiveLocks.filter(
+        (row) => !!row.reservation_id && relevantReservationIds.has(row.reservation_id)
+      );
+    } else {
+      relevantActiveLocks = [];
+    }
   }
+
+  if (relevantActiveLocks.length > 0) {
+    const occupied = relevantActiveLocks.map((l) => l.seat_label).join(', ');
+    throw new Error(`Seat(s) already occupied: ${occupied}`);
+  }
+
+  // Cleanup stale seat rows right before insert to avoid stale-lock conflicts.
+  await cleanupExpiredLockedSeatRows({
+    supabase,
+    tripKey: input.tripKey,
+    seatLabels,
+    nowIso,
+  });
 
   const { data: reservationRows, error: reservationError } = await supabase
     .from('tbl_reservations')
     .insert({
       full_name: input.fullName,
+      passenger_email: input.passengerEmail || null,
       contact_number: input.contactNumber,
       pickup_location: input.pickupLocation,
       route: input.route,
@@ -104,6 +198,10 @@ export async function createReservationIntent(input: CreateReservationIntentInpu
 
   if (lockInsertError) {
     await supabase.from('tbl_reservations').delete().eq('id', reservationId);
+    const code = String((lockInsertError as { code?: string })?.code || '');
+    if (code === '23505') {
+      throw new Error('Seat lock conflict detected. Please refresh and try again.');
+    }
     throw new Error(lockInsertError.message || 'Failed to lock selected seats.');
   }
 
@@ -120,7 +218,7 @@ export async function getReservationById(reservationId: string, guestToken?: str
   const { data: reservationRows, error } = await supabase
     .from('tbl_reservations')
     .select(
-      'id, full_name, contact_number, pickup_location, route, seat_labels, seat_count, amount_due, status, payment_id, paid_at, created_at, operator_user_id, queue_id, guest_token, updated_at'
+      'id, full_name, passenger_email, contact_number, pickup_location, route, seat_labels, seat_count, amount_due, status, payment_id, paid_at, created_at, operator_user_id, queue_id, guest_token, updated_at'
     )
     .eq('id', reservationId)
     .limit(1);
@@ -159,7 +257,68 @@ export async function getReservationMessages(reservationId: string) {
     .limit(200);
 
   if (error) throw new Error(error.message || 'Failed to fetch messages.');
-  return data || [];
+  const rows = (data || []) as Array<{
+    id: string;
+    sender_type: 'passenger' | 'operator';
+    sender_name: string | null;
+    message: string;
+    created_at: string;
+  }>;
+
+  const autoPaymentRows = rows.filter((row) =>
+    String(row.message || '').startsWith(AUTO_PAYMENT_PREFIX)
+  );
+
+  if (autoPaymentRows.length <= 1) {
+    return rows;
+  }
+
+  const deterministicId = buildAutoPaymentMessageId(reservationId);
+  const isExactPaymentReference = (value?: string | null) =>
+    typeof value === 'string' && value.trim().startsWith('pay_');
+
+  const preferredAutoRow =
+    autoPaymentRows.find((row) => row.id === deterministicId) ||
+    autoPaymentRows.find((row) => {
+      const suffix = String(row.message || '')
+        .slice(AUTO_PAYMENT_PREFIX.length)
+        .trim();
+      return isExactPaymentReference(suffix);
+    }) ||
+    autoPaymentRows
+      .slice()
+      .sort(
+        (a, b) =>
+          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      )[0];
+
+  const duplicateIds = autoPaymentRows
+    .filter((row) => row.id !== preferredAutoRow.id)
+    .map((row) => row.id)
+    .filter(Boolean);
+
+  if (duplicateIds.length > 0) {
+    const { error: dedupeDeleteError } = await supabase
+      .from('tbl_reservation_messages')
+      .delete()
+      .in('id', duplicateIds);
+
+    if (dedupeDeleteError) {
+      // Continue returning a deduped snapshot for the current response.
+      console.warn(
+        '[reservations] auto-payment message dedupe delete failed:',
+        dedupeDeleteError.message || dedupeDeleteError
+      );
+    }
+  }
+
+  return rows.filter(
+    (row) =>
+      !(
+        String(row.message || '').startsWith(AUTO_PAYMENT_PREFIX) &&
+        row.id !== preferredAutoRow.id
+      )
+  );
 }
 
 export async function addReservationMessage(input: {
@@ -188,7 +347,6 @@ export async function addReservationMessage(input: {
 export async function markReservationPaid(reservationId: string, paymentId?: string) {
   const supabase = getServiceClient();
   const nowIso = new Date().toISOString();
-  const AUTO_PAYMENT_PREFIX = 'Payment completed. Payment Reference: ';
   const isExactPaymentId = (value?: string | null) =>
     typeof value === 'string' && value.trim().startsWith('pay_');
 
@@ -207,6 +365,10 @@ export async function markReservationPaid(reservationId: string, paymentId?: str
     throw new Error('Reservation not found.');
   }
 
+  const canonicalReservationId =
+    String((reservation as { id?: string | null }).id || reservationId).trim() ||
+    reservationId;
+
   const incomingPaymentReference = (paymentId || '').trim();
   const currentPaymentReference = (reservation.payment_id || '').trim();
   const resolvedPaymentReference =
@@ -224,7 +386,7 @@ export async function markReservationPaid(reservationId: string, paymentId?: str
       paid_at: nowIso,
       updated_at: nowIso,
     })
-    .eq('id', reservationId);
+    .eq('id', canonicalReservationId);
 
   if (reservationError) {
     throw new Error(reservationError.message || 'Failed to mark reservation as paid.');
@@ -236,38 +398,39 @@ export async function markReservationPaid(reservationId: string, paymentId?: str
       status: 'reserved',
       expires_at: null,
     })
-    .eq('reservation_id', reservationId);
+    .eq('reservation_id', canonicalReservationId);
 
   if (lockError) {
     throw new Error(lockError.message || 'Failed to update seat lock status.');
   }
 
   const paymentReference = resolvedPaymentReference || '';
-  const autoMessage = `${AUTO_PAYMENT_PREFIX}${paymentReference}`;
-
-  const { data: existingMessageRows, error: messageReadError } = await supabase
-    .from('tbl_reservation_messages')
-    .select('id, message')
-    .eq('reservation_id', reservationId)
-    .eq('sender_type', 'passenger')
-    .order('created_at', { ascending: false })
-    .limit(50);
-
-  if (messageReadError) {
-    throw new Error(messageReadError.message || 'Failed to verify payment message.');
-  }
-
-  const existingPaymentMessage = (existingMessageRows || []).find((row: any) =>
-    String(row?.message || '').startsWith(AUTO_PAYMENT_PREFIX)
-  ) as { id: string; message: string } | undefined;
-
   const nextAutoMessage =
     paymentReference && paymentReference.trim()
-      ? autoMessage
+      ? `${AUTO_PAYMENT_PREFIX}${paymentReference}`
       : `${AUTO_PAYMENT_PREFIX}Processing`;
 
-  if (existingPaymentMessage?.id) {
-    const currentMessage = (existingPaymentMessage.message || '').trim();
+  const autoPaymentMessageId = buildAutoPaymentMessageId(canonicalReservationId);
+  const { data: deterministicMessageRows, error: deterministicReadError } =
+    await supabase
+      .from('tbl_reservation_messages')
+      .select('id, message')
+      .eq('id', autoPaymentMessageId)
+      .limit(1);
+
+  if (deterministicReadError) {
+    throw new Error(
+      deterministicReadError.message || 'Failed to verify payment reference message.'
+    );
+  }
+
+  const existingDeterministicMessage = deterministicMessageRows?.[0] as
+    | { id: string; message: string | null }
+    | undefined;
+
+  let messageToPersist = nextAutoMessage;
+  if (existingDeterministicMessage?.message) {
+    const currentMessage = String(existingDeterministicMessage.message || '').trim();
     const currentReference = currentMessage.startsWith(AUTO_PAYMENT_PREFIX)
       ? currentMessage.slice(AUTO_PAYMENT_PREFIX.length).trim()
       : '';
@@ -276,37 +439,78 @@ export async function markReservationPaid(reservationId: string, paymentId?: str
 
     // Never downgrade an exact pay_ reference to a non-exact one.
     if (currentIsExact && !incomingIsExact) {
-      return;
+      messageToPersist = currentMessage;
     }
-
-    if (currentMessage !== nextAutoMessage) {
-      const { error: messageUpdateError } = await supabase
-        .from('tbl_reservation_messages')
-        .update({ message: nextAutoMessage })
-        .eq('id', existingPaymentMessage.id);
-
-      if (messageUpdateError) {
-        throw new Error(
-          messageUpdateError.message || 'Failed to update payment reference message.'
-        );
-      }
-    }
-    return;
   }
 
-  const { error: messageInsertError } = await supabase
+  const { data: existingAutoRows, error: existingAutoReadError } = await supabase
     .from('tbl_reservation_messages')
-    .insert({
-      reservation_id: reservationId,
-      sender_type: 'passenger',
-      sender_name: reservation.full_name || 'Passenger',
-      message: nextAutoMessage,
-    });
+    .select('id, message')
+    .eq('reservation_id', canonicalReservationId)
+    .like('message', `${AUTO_PAYMENT_PREFIX}%`)
+    .order('created_at', { ascending: true })
+    .limit(50);
 
-  if (messageInsertError) {
+  if (existingAutoReadError) {
     throw new Error(
-      messageInsertError.message || 'Failed to save payment reference message.'
+      existingAutoReadError.message || 'Failed to inspect payment reference messages.'
     );
+  }
+
+  const exactExistingMessage = (existingAutoRows || []).find((row) => {
+    return String(row.message || '').trim() === messageToPersist.trim();
+  }) as { id: string; message: string | null } | undefined;
+
+  const messageRowIdToKeep = exactExistingMessage?.id || autoPaymentMessageId;
+
+  const { error: messageUpsertError } = await supabase
+    .from('tbl_reservation_messages')
+    .upsert(
+      {
+        id: messageRowIdToKeep,
+        reservation_id: canonicalReservationId,
+        sender_type: 'passenger',
+        sender_name: reservation.full_name || 'Passenger',
+        message: messageToPersist,
+      },
+      { onConflict: 'id' }
+    );
+
+  if (messageUpsertError) {
+    throw new Error(
+      messageUpsertError.message || 'Failed to save payment reference message.'
+    );
+  }
+
+  // Hard cleanup: keep only the deterministic auto-payment message row.
+  const { data: duplicateRows, error: duplicateReadError } = await supabase
+    .from('tbl_reservation_messages')
+    .select('id')
+    .eq('reservation_id', canonicalReservationId)
+    .like('message', `${AUTO_PAYMENT_PREFIX}%`)
+    .neq('id', messageRowIdToKeep);
+
+  if (duplicateReadError) {
+    throw new Error(
+      duplicateReadError.message || 'Failed to validate payment message duplicates.'
+    );
+  }
+
+  const duplicateIds = (duplicateRows || [])
+    .map((row: { id?: string | null }) => row.id)
+    .filter((id): id is string => !!id);
+
+  if (duplicateIds.length > 0) {
+    const { error: duplicateDeleteError } = await supabase
+      .from('tbl_reservation_messages')
+      .delete()
+      .in('id', duplicateIds);
+
+    if (duplicateDeleteError) {
+      throw new Error(
+        duplicateDeleteError.message || 'Failed to clean duplicate payment messages.'
+      );
+    }
   }
 }
 
@@ -318,7 +522,7 @@ export async function listReservationsByOperator(
   const { data, error } = await supabase
     .from('tbl_reservations')
     .select(
-      'id, full_name, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at'
+      'id, full_name, passenger_email, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at'
     )
     .eq('operator_user_id', operatorUserId)
     .order('created_at', { ascending: false })
@@ -326,6 +530,104 @@ export async function listReservationsByOperator(
 
   if (error) throw new Error(error.message || 'Failed to fetch operator reservations.');
   return data || [];
+}
+
+export async function markReservationsDepartedForQueue(input: {
+  queueId: string;
+  operatorUserId: string;
+  senderName?: string;
+}) {
+  const supabase = getServiceClient();
+  const nowIso = new Date().toISOString();
+
+  const { data: rows, error: readError } = await supabase
+    .from('tbl_reservations')
+    .select('id, full_name, passenger_email, route, seat_labels, seat_count')
+    .eq('queue_id', input.queueId)
+    .eq('operator_user_id', input.operatorUserId)
+    .in('status', ['confirmed', 'pending_operator_approval', 'paid']);
+
+  if (readError) {
+    throw new Error(readError.message || 'Failed to load queue reservations.');
+  }
+
+  const reservations = (rows || []) as Array<{
+    id: string;
+    full_name: string | null;
+    passenger_email: string | null;
+    route: string | null;
+    seat_labels: string[] | null;
+    seat_count: number | null;
+  }>;
+  if (reservations.length === 0) {
+    return { updatedCount: 0, reservations: [] };
+  }
+
+  const reservationIds = reservations.map((row) => row.id).filter(Boolean);
+  let departedStatusSaved = false;
+
+  const { error: departedUpdateError } = await supabase
+    .from('tbl_reservations')
+    .update({
+      status: 'departed',
+      updated_at: nowIso,
+    })
+    .in('id', reservationIds);
+
+  if (departedUpdateError) {
+    const departedErrorMessage = String(departedUpdateError.message || '').toLowerCase();
+    const departedErrorCode = String((departedUpdateError as { code?: string }).code || '');
+    const isStatusConstraintMismatch =
+      departedErrorCode === '23514' ||
+      departedErrorMessage.includes('tbl_reservations_status_check') ||
+      departedErrorMessage.includes('violates check constraint');
+
+    if (!isStatusConstraintMismatch) {
+      throw new Error(
+        departedUpdateError.message || 'Failed to mark reservations as departed.'
+      );
+    }
+
+    const { error: timestampOnlyError } = await supabase
+      .from('tbl_reservations')
+      .update({
+        updated_at: nowIso,
+      })
+      .in('id', reservationIds);
+
+    if (timestampOnlyError) {
+      throw new Error(
+        timestampOnlyError.message || 'Failed to update queue reservations.'
+      );
+    }
+  } else {
+    departedStatusSaved = true;
+  }
+
+  const senderName = (input.senderName || '').trim() || 'Operator';
+  const autoMessages = reservations.map((reservation) => ({
+    id: buildAutoDepartedMessageId(reservation.id),
+    reservation_id: reservation.id,
+    sender_type: 'operator' as const,
+    sender_name: senderName,
+    message: AUTO_DEPARTED_MESSAGE,
+  }));
+
+  const { error: messageError } = await supabase
+    .from('tbl_reservation_messages')
+    .upsert(autoMessages, { onConflict: 'id' });
+
+  if (messageError) {
+    throw new Error(
+      messageError.message || 'Failed to post departed notification messages.'
+    );
+  }
+
+  return {
+    updatedCount: reservations.length,
+    reservations,
+    departedStatusSaved,
+  };
 }
 
 export async function updateReservationStatusByOperator(input: {
@@ -348,7 +650,9 @@ export async function updateReservationStatusByOperator(input: {
     .eq('id', input.reservationId)
     .eq('operator_user_id', input.operatorUserId)
     .in('status', allowedCurrentStatuses)
-    .select('id, status')
+    .select(
+      'id, status, full_name, passenger_email, route, seat_labels, seat_count, operator_user_id, queue_id'
+    )
     .limit(1);
 
   if (error) throw new Error(error.message || 'Failed to update reservation status.');
@@ -406,19 +710,13 @@ export async function releaseReservationLocks(reservationId: string) {
     .eq('status', 'pending_payment');
 }
 
-export async function getTripSeatStatuses(tripKey: string) {
+export async function getTripSeatStatuses(tripKey: string, queueId?: string | null) {
   const supabase = getServiceClient();
   const nowIso = new Date().toISOString();
 
-  await supabase
-    .from('tbl_seat_locks')
-    .delete()
-    .lt('expires_at', nowIso)
-    .eq('status', 'locked');
-
   const { data, error } = await supabase
     .from('tbl_seat_locks')
-    .select('seat_label, status, expires_at')
+    .select('reservation_id, seat_label, status, expires_at')
     .eq('trip_key', tripKey)
     .in('status', ['locked', 'reserved']);
 
@@ -426,12 +724,77 @@ export async function getTripSeatStatuses(tripKey: string) {
     throw new Error(error.message || 'Failed to fetch trip seat statuses.');
   }
 
+  let relevantRows = data || [];
+  const reservationIds = Array.from(
+    new Set(
+      relevantRows
+        .map((row) => row.reservation_id)
+        .filter((id): id is string => !!id)
+    )
+  );
+
+  let reservationRows: Array<{
+    id: string;
+    pickup_location: string | null;
+    payment_id: string | null;
+  }> = [];
+
+  if (reservationIds.length > 0) {
+    let reservationQuery = supabase
+      .from('tbl_reservations')
+      .select('id, pickup_location, payment_id')
+      .in('id', reservationIds);
+
+    if (queueId) {
+      reservationQuery = reservationQuery.eq('queue_id', queueId);
+    }
+
+    const { data: fetchedReservationRows, error: reservationFilterError } =
+      await reservationQuery;
+
+    if (reservationFilterError) {
+      throw new Error(
+        reservationFilterError.message || 'Failed to filter seat statuses by queue.'
+      );
+    }
+
+    reservationRows = (fetchedReservationRows || []) as Array<{
+      id: string;
+      pickup_location: string | null;
+      payment_id: string | null;
+    }>;
+
+    const relevantReservationIds = new Set(
+      reservationRows.map((row) => row.id).filter(Boolean)
+    );
+    relevantRows = relevantRows.filter(
+      (row) => !!row.reservation_id && relevantReservationIds.has(row.reservation_id)
+    );
+  } else {
+    relevantRows = [];
+  }
+
   const lockedSeats: string[] = [];
   const reservedSeats: string[] = [];
+  const occupiedSeats: string[] = [];
+  const walkInReservationIds = new Set(
+    reservationRows
+      .filter((row) => {
+        const pickup = (row.pickup_location || '').toUpperCase();
+        const paymentId = (row.payment_id || '').toLowerCase();
+        return pickup === 'WALK_IN' || paymentId === 'walk_in';
+      })
+      .map((row) => row.id)
+      .filter(Boolean)
+  );
 
-  for (const row of data || []) {
+  for (const row of relevantRows) {
     if (row.status === 'reserved') {
-      reservedSeats.push(row.seat_label);
+      if (row.reservation_id && walkInReservationIds.has(row.reservation_id)) {
+        occupiedSeats.push(row.seat_label);
+      } else {
+        reservedSeats.push(row.seat_label);
+      }
       continue;
     }
     if (row.status === 'locked' && row.expires_at && row.expires_at > nowIso) {
@@ -443,6 +806,7 @@ export async function getTripSeatStatuses(tripKey: string) {
     tripKey,
     lockedSeats,
     reservedSeats,
+    occupiedSeats,
   };
 }
 
@@ -461,15 +825,10 @@ const normalizeSeatLabel = (value: string) => value.trim();
 export async function getOperatorTripSeatMap(input: {
   operatorUserId: string;
   tripKey: string;
+  queueId?: string | null;
 }) {
   const supabase = getServiceClient();
   const nowIso = new Date().toISOString();
-
-  await supabase
-    .from('tbl_seat_locks')
-    .delete()
-    .lt('expires_at', nowIso)
-    .eq('status', 'locked');
 
   const { data: lockRows, error: lockError } = await supabase
     .from('tbl_seat_locks')
@@ -481,17 +840,25 @@ export async function getOperatorTripSeatMap(input: {
     throw new Error(lockError.message || 'Failed to load seat locks.');
   }
 
+  const activeSeatLocks = (lockRows || []).filter((row: any) =>
+    isSeatLockActive(row, nowIso)
+  );
+
   const reservationIds = Array.from(
-    new Set((lockRows || []).map((row: any) => row.reservation_id).filter(Boolean))
+    new Set(activeSeatLocks.map((row: any) => row.reservation_id).filter(Boolean))
   );
 
   const reservationsById = new Map<string, any>();
   if (reservationIds.length > 0) {
-    const { data: reservationRows, error: reservationError } = await supabase
+    let reservationQuery = supabase
       .from('tbl_reservations')
       .select('id, full_name, operator_user_id, pickup_location, payment_id')
       .in('id', reservationIds)
       .eq('operator_user_id', input.operatorUserId);
+    if (input.queueId) {
+      reservationQuery = reservationQuery.eq('queue_id', input.queueId);
+    }
+    const { data: reservationRows, error: reservationError } = await reservationQuery;
 
     if (reservationError) {
       throw new Error(reservationError.message || 'Failed to load reservations.');
@@ -513,7 +880,7 @@ export async function getOperatorTripSeatMap(input: {
     });
   }
 
-  for (const lock of lockRows || []) {
+  for (const lock of activeSeatLocks) {
     const seatLabel = normalizeSeatLabel(String(lock.seat_label || ''));
     if (!bySeat.has(seatLabel)) continue;
     const reservation = reservationsById.get(lock.reservation_id);
@@ -554,26 +921,30 @@ export async function assignWalkInSeat(input: {
     throw new Error('Invalid seat label.');
   }
 
-  await supabase
-    .from('tbl_seat_locks')
-    .delete()
-    .lt('expires_at', nowIso)
-    .eq('status', 'locked');
-
   const { data: existingLocks, error: lockFetchError } = await supabase
     .from('tbl_seat_locks')
-    .select('id')
+    .select('id, status, expires_at')
     .eq('trip_key', input.tripKey)
     .eq('seat_label', seatLabel)
-    .in('status', ['locked', 'reserved'])
-    .limit(1);
+    .in('status', ['locked', 'reserved']);
 
   if (lockFetchError) {
     throw new Error(lockFetchError.message || 'Failed to validate seat.');
   }
-  if ((existingLocks || []).length > 0) {
+
+  const activeLocks = (existingLocks || []).filter((row: any) =>
+    isSeatLockActive(row, nowIso)
+  );
+  if (activeLocks.length > 0) {
     throw new Error(`Seat ${seatLabel} is already occupied.`);
   }
+
+  await cleanupExpiredLockedSeatRows({
+    supabase,
+    tripKey: input.tripKey,
+    seatLabels: [seatLabel],
+    nowIso,
+  });
 
   const { data: reservationRows, error: reservationError } = await supabase
     .from('tbl_reservations')
@@ -627,6 +998,7 @@ export async function releaseWalkInSeat(input: {
   operatorUserId: string;
   tripKey: string;
   seatLabel: string;
+  queueId?: string | null;
 }) {
   const supabase = getServiceClient();
   const seatLabel = normalizeSeatLabel(input.seatLabel);
@@ -651,12 +1023,15 @@ export async function releaseWalkInSeat(input: {
     throw new Error('Seat is not occupied.');
   }
 
-  const { data: reservationRows, error: reservationError } = await supabase
+  let reservationQuery = supabase
     .from('tbl_reservations')
     .select('id, payment_id, pickup_location')
     .eq('id', lock.reservation_id)
-    .eq('operator_user_id', input.operatorUserId)
-    .limit(1);
+    .eq('operator_user_id', input.operatorUserId);
+  if (input.queueId) {
+    reservationQuery = reservationQuery.eq('queue_id', input.queueId);
+  }
+  const { data: reservationRows, error: reservationError } = await reservationQuery.limit(1);
 
   if (reservationError) {
     throw new Error(reservationError.message || 'Failed to load walk-in reservation.');

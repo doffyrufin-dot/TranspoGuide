@@ -13,6 +13,7 @@ import {
   FaBolt,
   FaArrowRight,
 } from 'react-icons/fa';
+import { FadeIn, Stagger, StaggerItem } from '@/components/ui/motion';
 
 const FEATURES = [
   { icon: <FaSearch />, title: 'Easy Route Search', tag: 'Smart Search', text: 'Find the best transport routes instantly with smart filtering.' },
@@ -52,7 +53,8 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
         value.forEach((v) => nextParams.append(key, v));
       }
     }
-    redirect(`/login?${nextParams.toString()}`);
+    nextParams.set('flow', 'login');
+    redirect(`/auth/callback?${nextParams.toString()}`);
   }
 
   return (
@@ -63,7 +65,7 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
       <section className="relative pt-36 pb-24 px-6 overflow-hidden">
         <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-10 items-center">
           {/* Left */}
-          <div data-aos="fade-right">
+          <FadeIn>
             <div className="section-badge mb-6 flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-[var(--primary)] animate-pulse" />
               Join <span className="font-bold" style={{ color: 'var(--primary)' }}>1,200+ commuters</span> using TranspoGuide
@@ -93,10 +95,10 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
                 No account required
               </div>
             </div>
-          </div>
+          </FadeIn>
 
           {/* Right — hero image card */}
-          <div data-aos="fade-left" className="hidden lg:block">
+          <FadeIn className="hidden lg:block" delay={0.08}>
             <div className="card-glow p-4 rounded-2xl">
               <div className="relative w-full aspect-video rounded-xl overflow-hidden" style={{ background: 'var(--tg-bg-alt)' }}>
                 <video className="absolute inset-0 w-full h-full object-cover rounded-xl" src="/videos/vids.mp4" autoPlay loop muted playsInline />
@@ -110,14 +112,14 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
                 <span className="step-badge flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-[var(--primary)] animate-pulse" />Live</span>
               </div>
             </div>
-          </div>
+          </FadeIn>
         </div>
       </section>
 
       {/* ── STATS BAR ─────────────────────────────────── */}
-      <section className="py-10 px-6" data-aos="fade-up">
+      <section className="py-10 px-6">
         <div className="max-w-5xl mx-auto">
-          <div className="card-glow p-6 md:p-8 rounded-2xl">
+          <FadeIn className="card-glow p-6 md:p-8 rounded-2xl">
             <div className="flex items-center gap-4 mb-4">
               <span className="step-badge">Platform Growth</span>
               <span className="text-muted-theme text-sm">Trusted by commuters across Leyte</span>
@@ -133,68 +135,72 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
                 </div>
               ))}
             </div>
-          </div>
+          </FadeIn>
         </div>
       </section>
 
       {/* ── FEATURES (4 Ways / Why Choose) ──────────── */}
       <section className="py-24 px-6">
         <div className="max-w-7xl mx-auto">
-          <div className="text-center mb-16" data-aos="fade-up">
+          <FadeIn className="text-center mb-16">
             <h2 className="text-3xl md:text-4xl font-extrabold text-theme">
               4 Ways to <span className="text-gradient" style={{ fontStyle: 'italic' }}>Travel Smarter</span>
             </h2>
             <p className="mt-3 text-muted-theme max-w-lg mx-auto">
               Multiple transport options. One platform. Real-time information.
             </p>
-          </div>
+          </FadeIn>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+          <Stagger className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
             {FEATURES.map((item, i) => (
-              <div key={i} data-aos="fade-up" data-aos-delay={i * 80} className="card-glow p-7 flex flex-col gap-4 group rounded-2xl">
-                <div className="icon-badge">{item.icon}</div>
-                <div>
-                  <h3 className="text-theme font-bold text-lg">{item.title}</h3>
-                  <p className="text-[var(--primary)] text-sm font-semibold mt-0.5">{item.tag}</p>
-                  <p className="text-muted-theme text-sm mt-2 leading-relaxed">{item.text}</p>
+              <StaggerItem key={i}>
+                <div className="card-glow p-7 flex flex-col gap-4 group rounded-2xl">
+                  <div className="icon-badge">{item.icon}</div>
+                  <div>
+                    <h3 className="text-theme font-bold text-lg">{item.title}</h3>
+                    <p className="text-[var(--primary)] text-sm font-semibold mt-0.5">{item.tag}</p>
+                    <p className="text-muted-theme text-sm mt-2 leading-relaxed">{item.text}</p>
+                  </div>
                 </div>
-              </div>
+              </StaggerItem>
             ))}
-          </div>
+          </Stagger>
         </div>
       </section>
 
       {/* ── HOW IT WORKS (3 Steps) ─────────────────── */}
       <section className="py-24 px-6">
         <div className="max-w-7xl mx-auto">
-          <div className="text-center mb-16" data-aos="fade-up">
+          <FadeIn className="text-center mb-16">
             <h2 className="text-3xl md:text-4xl font-extrabold text-theme">
               Get Started in <span className="text-gradient" style={{ fontStyle: 'italic' }}>3 Simple Steps</span>
             </h2>
             <p className="mt-3 text-muted-theme max-w-lg mx-auto">
               No scattered tools. No tech headaches. Just search, compare, and go.
             </p>
-          </div>
+          </FadeIn>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <Stagger className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {STEPS.map((step, i) => (
-              <div key={i} data-aos="fade-up" data-aos-delay={i * 100}>
-                <div className="flex justify-center mb-4"><span className="step-badge">Step {i + 1}</span></div>
-                <div className="card-glow p-8 text-center rounded-2xl group">
-                  <div className="icon-badge mx-auto mb-5">{step.icon}</div>
-                  <h3 className="text-theme font-bold text-xl mb-2">{step.title}</h3>
-                  <p className="text-muted-theme text-sm leading-relaxed">{step.text}</p>
+              <StaggerItem key={i}>
+                <div>
+                  <div className="flex justify-center mb-4"><span className="step-badge">Step {i + 1}</span></div>
+                  <div className="card-glow p-8 text-center rounded-2xl group">
+                    <div className="icon-badge mx-auto mb-5">{step.icon}</div>
+                    <h3 className="text-theme font-bold text-xl mb-2">{step.title}</h3>
+                    <p className="text-muted-theme text-sm leading-relaxed">{step.text}</p>
+                  </div>
                 </div>
-              </div>
+              </StaggerItem>
             ))}
-          </div>
+          </Stagger>
         </div>
       </section>
 
       {/* ── NO ACCOUNT NEEDED ──────────────────────── */}
       <section className="py-24 px-6">
         <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-14 items-center">
-          <div data-aos="fade-right">
+          <FadeIn>
             <div className="section-badge">Accessibility</div>
             <h2 className="text-3xl md:text-4xl font-extrabold text-theme mt-3 mb-6">
               No Account <span className="text-gradient" style={{ fontStyle: 'italic' }}>Needed</span>
@@ -214,9 +220,9 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
                 </div>
               ))}
             </div>
-          </div>
+          </FadeIn>
 
-          <div data-aos="fade-left" className="flex flex-col gap-4">
+          <FadeIn className="flex flex-col gap-4" delay={0.08}>
             <div className="card-glow p-6 rounded-2xl flex items-center justify-between" style={{ borderColor: 'var(--tg-border-primary)' }}>
               <div>
                 <h3 className="text-theme font-bold text-lg">Quick Access</h3>
@@ -237,13 +243,13 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
               </div>
               <div className="icon-badge w-14 h-14 text-2xl ml-6"><FaSync /></div>
             </div>
-          </div>
+          </FadeIn>
         </div>
       </section>
 
       {/* ── CTA ────────────────────────────────────── */}
       <section className="py-24 px-6">
-        <div className="max-w-3xl mx-auto" data-aos="fade-up">
+        <FadeIn className="max-w-3xl mx-auto">
           <div className="card-glow p-10 md:p-14 rounded-2xl text-center" style={{ background: 'var(--tg-bg-alt)' }}>
             <h2 className="text-3xl md:text-4xl font-extrabold text-theme">
               Ready to Turn Your <span className="text-gradient" style={{ fontStyle: 'italic' }}>Commute Into Comfort?</span>
@@ -258,7 +264,7 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
             </div>
             <p className="mt-4 text-xs text-muted-theme">Free to start — No account required</p>
           </div>
-        </div>
+        </FadeIn>
       </section>
     </main>
   );

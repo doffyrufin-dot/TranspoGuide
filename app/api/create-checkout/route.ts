@@ -4,6 +4,8 @@ import { createClient } from '@supabase/supabase-js';
 const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY || '';
 
 const normalizeBaseUrl = (value: string) => value.replace(/\/+$/, '');
+const isValidEmail = (value: string) =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((value || '').trim());
 
 const resolveBaseUrl = (req: NextRequest) => {
   const fromEnv = (
@@ -69,7 +71,12 @@ const resolveOperatorSecretKey = async (params: {
     null;
 
   if (!operatorUserId) {
-    if (PAYMONGO_SECRET_KEY) return PAYMONGO_SECRET_KEY;
+    if (PAYMONGO_SECRET_KEY) {
+      return {
+        secretKey: PAYMONGO_SECRET_KEY,
+        operatorUserId: '',
+      };
+    }
     throw new Error('No operator is linked to this reservation.');
   }
 
@@ -85,9 +92,19 @@ const resolveOperatorSecretKey = async (params: {
   }
 
   const key = ((accountRows?.[0] as any)?.paymongo_secret_key || '').trim();
-  if (key) return key;
+  if (key) {
+    return {
+      secretKey: key,
+      operatorUserId,
+    };
+  }
 
-  if (PAYMONGO_SECRET_KEY) return PAYMONGO_SECRET_KEY;
+  if (PAYMONGO_SECRET_KEY) {
+    return {
+      secretKey: PAYMONGO_SECRET_KEY,
+      operatorUserId,
+    };
+  }
   throw new Error('Operator payment account key is not configured.');
 };
 
@@ -119,6 +136,7 @@ export async function POST(req: NextRequest) {
       amount,
       seatLabels,
       fullName,
+      passengerEmail,
       contactNumber,
       route,
       reservationId,
@@ -129,9 +147,16 @@ export async function POST(req: NextRequest) {
     if (!reservationId || typeof reservationId !== 'string') {
       return NextResponse.json({ error: 'Missing reservation ID.' }, { status: 400 });
     }
+    if (!isValidEmail(passengerEmail || '')) {
+      return NextResponse.json(
+        { error: 'Invalid passenger email.' },
+        { status: 400 }
+      );
+    }
 
     const amountInCentavos = Math.round(Number(amount || 0) * 100);
-    const resolvedSecretKey = await resolveOperatorSecretKey({
+    const { secretKey: resolvedSecretKey, operatorUserId: resolvedOperatorUserId } =
+      await resolveOperatorSecretKey({
       reservationId,
       operatorUserIdFromBody: operatorUserId,
     });
@@ -171,10 +196,11 @@ export async function POST(req: NextRequest) {
             metadata: {
               reservation_id: reservationId,
               full_name: fullName,
+              passenger_email: passengerEmail || '',
               contact_number: contactNumber,
               seats: seatLabels,
               route,
-              operator_user_id: operatorUserId || '',
+              operator_user_id: resolvedOperatorUserId || '',
               queue_id: queueId || '',
             },
           },

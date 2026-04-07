@@ -5,6 +5,7 @@ create extension if not exists pgcrypto;
 create table if not exists public.tbl_reservations (
   id uuid primary key default gen_random_uuid(),
   full_name text not null,
+  passenger_email text,
   contact_number text not null,
   pickup_location text not null,
   route text not null,
@@ -35,9 +36,9 @@ create table if not exists public.tbl_seat_locks (
   created_at timestamptz not null default now()
 );
 
-create unique index if not exists idx_tbl_seat_locks_trip_seat_locked
+create unique index if not exists idx_tbl_seat_locks_trip_seat_active
   on public.tbl_seat_locks (trip_key, seat_label)
-  where status = 'locked';
+  where status in ('locked', 'reserved');
 
 create index if not exists idx_tbl_reservations_trip_key
   on public.tbl_reservations (trip_key);
@@ -53,6 +54,9 @@ create index if not exists idx_tbl_reservations_operator
 
 create index if not exists idx_tbl_reservations_queue
   on public.tbl_reservations (queue_id);
+
+create index if not exists idx_tbl_reservations_passenger_email
+  on public.tbl_reservations (passenger_email);
 
 create index if not exists idx_tbl_seat_locks_reservation
   on public.tbl_seat_locks (reservation_id);

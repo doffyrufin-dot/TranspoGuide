@@ -8,6 +8,7 @@ import {
 
 const CHAT_GRACE_MINUTES = 30;
 const ACTIVE_QUEUE_STATUSES = ['queued', 'boarding'];
+export const dynamic = 'force-dynamic';
 
 const getAuthorizedOperatorId = async (req: NextRequest) => {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -117,7 +118,14 @@ export async function GET(req: NextRequest) {
     await ensureReservationOwnedByOperator(reservationId, operatorUserId);
 
     const messages = await getReservationMessages(reservationId);
-    return NextResponse.json({ messages });
+    return NextResponse.json(
+      { messages },
+      {
+        headers: {
+          'Cache-Control': 'no-store, max-age=0, must-revalidate',
+        },
+      }
+    );
   } catch (error: any) {
     const msg = error?.message || 'Failed to load reservation messages.';
     if (msg === 'missing_auth_token') {

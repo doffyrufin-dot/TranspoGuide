@@ -1,7 +1,10 @@
+import { http } from '@/lib/http/client';
+
 export interface CreateCheckoutPayload {
   amount: number;
   seatLabels: string;
   fullName: string;
+  passengerEmail: string;
   contactNumber: string;
   route: string;
   reservationId: string;
@@ -23,6 +26,7 @@ export interface PaymentRecord {
 
 export interface CreateReservationIntentPayload {
   fullName: string;
+  passengerEmail: string;
   contactNumber: string;
   pickupLocation: string;
   route: string;
@@ -43,11 +47,13 @@ export interface TripSeatStatusResult {
   trip_key: string;
   locked_seats: string[];
   reserved_seats: string[];
+  occupied_seats: string[];
 }
 
 export interface ReservationStatusPayload {
   id: string;
   full_name: string;
+  passenger_email?: string | null;
   contact_number: string;
   pickup_location: string;
   route: string;
@@ -80,18 +86,11 @@ export interface ReservationStatusResult {
 export async function createReservationIntent(
   payload: CreateReservationIntentPayload
 ): Promise<ReservationIntentResult> {
-  const res = await fetch('/api/reservations/intent', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to create reservation.');
-  }
-
-  return data as ReservationIntentResult;
+  const { data } = await http.post<ReservationIntentResult>(
+    '/api/reservations/intent',
+    payload
+  );
+  return data;
 }
 
 export async function fetchReservationStatus(
@@ -104,14 +103,13 @@ export async function fetchReservationStatus(
   if (reservationToken?.trim()) {
     params.set('reservationToken', reservationToken.trim());
   }
-  const res = await fetch(
-    `/api/reservations/status?${params.toString()}`
+  const { data } = await http.get<ReservationStatusResult>(
+    `/api/reservations/status?${params.toString()}`,
+    {
+      headers: { 'Cache-Control': 'no-store' },
+    }
   );
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to fetch reservation status.');
-  }
-  return data as ReservationStatusResult;
+  return data;
 }
 
 export async function sendReservationMessage(input: {
@@ -121,58 +119,43 @@ export async function sendReservationMessage(input: {
   senderType: 'passenger' | 'operator';
   senderName: string;
 }): Promise<ReservationMessage> {
-  const res = await fetch('/api/reservations/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to send message.');
-  }
-  return data.message as ReservationMessage;
+  const { data } = await http.post<{ message: ReservationMessage }>(
+    '/api/reservations/chat',
+    input
+  );
+  return data.message;
 }
 
 export async function createCheckoutSession(
   payload: CreateCheckoutPayload
 ): Promise<string> {
-  const res = await fetch('/api/create-checkout', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Payment failed. Please try again.');
-  }
-
-  return data.checkout_url as string;
+  const { data } = await http.post<{ checkout_url: string }>(
+    '/api/create-checkout',
+    payload
+  );
+  return data.checkout_url;
 }
 
 export async function fetchPaymentHistory(): Promise<PaymentRecord[]> {
-  const res = await fetch('/api/payments');
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to fetch payments.');
-  }
-
+  const { data } = await http.get<{ payments?: PaymentRecord[] }>('/api/payments');
   return (data.payments || []) as PaymentRecord[];
 }
 
 export async function fetchTripSeatStatuses(
-  tripKey: string
+  tripKey: string,
+  queueId?: string | null
 ): Promise<TripSeatStatusResult> {
-  const res = await fetch(
-    `/api/reservations/seats?tripKey=${encodeURIComponent(tripKey)}`,
-    { cache: 'no-store' }
-  );
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to fetch seat statuses.');
+  const params = new URLSearchParams({
+    tripKey,
+  });
+  if (queueId) {
+    params.set('queueId', queueId);
   }
-
-  return data as TripSeatStatusResult;
+  const { data } = await http.get<TripSeatStatusResult>(
+    `/api/reservations/seats?${params.toString()}`,
+    {
+      headers: { 'Cache-Control': 'no-store' },
+    }
+  );
+  return data;
 }

@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createReservationIntent } from '@/lib/db/reservations';
 
+const isValidEmail = (value: string) =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const {
       fullName,
+      passengerEmail,
       contactNumber,
       pickupLocation,
       route,
@@ -16,6 +20,7 @@ export async function POST(req: NextRequest) {
       operatorUserId,
     } = body as {
       fullName: string;
+      passengerEmail: string;
       contactNumber: string;
       pickupLocation: string;
       route: string;
@@ -28,6 +33,7 @@ export async function POST(req: NextRequest) {
 
     if (
       !fullName?.trim() ||
+      !passengerEmail?.trim() ||
       !contactNumber?.trim() ||
       !pickupLocation?.trim() ||
       !route?.trim() ||
@@ -40,9 +46,16 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+    if (!isValidEmail(passengerEmail)) {
+      return NextResponse.json(
+        { error: 'Invalid passenger email.' },
+        { status: 400 }
+      );
+    }
 
     const intent = await createReservationIntent({
       fullName: fullName.trim(),
+      passengerEmail: passengerEmail.trim().toLowerCase(),
       contactNumber: contactNumber.trim(),
       pickupLocation: pickupLocation.trim(),
       route: route.trim(),

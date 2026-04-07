@@ -4,6 +4,8 @@ import {
   getReservationMessages,
 } from '@/lib/db/reservations';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest) {
   try {
     const reservationId = req.nextUrl.searchParams.get('reservationId')?.trim();
@@ -26,11 +28,18 @@ export async function GET(req: NextRequest) {
     }
 
     const messages = await getReservationMessages(reservationId);
-    return NextResponse.json({
-      reservation: data.reservation,
-      operator: data.operator,
-      messages,
-    });
+    return NextResponse.json(
+      {
+        reservation: data.reservation,
+        operator: data.operator,
+        messages,
+      },
+      {
+        headers: {
+          'Cache-Control': 'no-store, max-age=0, must-revalidate',
+        },
+      }
+    );
   } catch (error: any) {
     return NextResponse.json(
       { error: error?.message || 'Failed to fetch reservation status.' },

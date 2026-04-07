@@ -1,6 +1,7 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
+import { createContext, useContext, ReactNode, useMemo } from 'react';
+import { ThemeProvider as NextThemesProvider, useTheme as useNextTheme } from 'next-themes';
 
 type Theme = 'light' | 'dark';
 
@@ -16,32 +17,34 @@ const ThemeContext = createContext<ThemeContextType>({
 
 export const useTheme = () => useContext(ThemeContext);
 
-export const ThemeProvider = ({ children }: { children: ReactNode }) => {
-  const [theme, setTheme] = useState<Theme>('light');
+const ThemeBridge = ({ children }: { children: ReactNode }) => {
+  const { resolvedTheme, setTheme } = useNextTheme();
 
-  useEffect(() => {
-    // Read saved preference, fall back to system preference, then light
-    const saved = localStorage.getItem('tg-theme') as Theme | null;
-    const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    const initial: Theme = saved ?? (systemDark ? 'dark' : 'light');
-    applyTheme(initial);
-    setTheme(initial);
-  }, []);
+  const theme: Theme = resolvedTheme === 'dark' ? 'dark' : 'light';
 
-  const applyTheme = (t: Theme) => {
-    document.documentElement.setAttribute('data-theme', t);
-  };
-
-  const toggle = () => {
-    const next: Theme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(next);
-    applyTheme(next);
-    localStorage.setItem('tg-theme', next);
-  };
+  const value = useMemo<ThemeContextType>(
+    () => ({
+      theme,
+      toggle: () => setTheme(theme === 'dark' ? 'light' : 'dark'),
+    }),
+    [theme, setTheme]
+  );
 
   return (
-    <ThemeContext.Provider value={{ theme, toggle }}>
+    <ThemeContext.Provider value={value}>
       {children}
     </ThemeContext.Provider>
+  );
+};
+
+export const ThemeProvider = ({ children }: { children: ReactNode }) => {
+  return (
+    <NextThemesProvider
+      attribute="data-theme"
+      defaultTheme="system"
+      enableSystem
+    >
+      <ThemeBridge>{children}</ThemeBridge>
+    </NextThemesProvider>
   );
 };

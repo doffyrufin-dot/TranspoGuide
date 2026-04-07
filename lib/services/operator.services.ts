@@ -1,3 +1,5 @@
+import { http } from '@/lib/http/client';
+
 export interface OperatorPaymentRecord {
   id: string;
   passenger: string;
@@ -21,6 +23,9 @@ export interface OperatorReservationRecord {
   status: string;
   created_at: string;
   paid_at: string | null;
+  latest_message?: string | null;
+  latest_message_at?: string | null;
+  latest_message_sender?: 'passenger' | 'operator' | null;
 }
 
 export interface OperatorReservationMessage {
@@ -63,11 +68,13 @@ export interface OperatorUnreadChatThread {
   route: string;
   status: string;
   latest_at: string;
+  unread_count: number;
 }
 
 export interface OperatorUnreadChatResult {
   unreadThreadCount: number;
   unreadThreads: OperatorUnreadChatThread[];
+  unreadByReservation?: Record<string, number>;
 }
 
 export interface OperatorChatConversationsResult {
@@ -91,41 +98,32 @@ export interface OperatorReservationListResult {
 export async function fetchOperatorPaymentHistory(
   accessToken: string
 ): Promise<OperatorPaymentHistoryResult> {
-  const res = await fetch('/api/operator/payments', {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-    cache: 'no-store',
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to fetch operator payment history.');
-  }
-
-  return data as OperatorPaymentHistoryResult;
+  const { data } = await http.get<OperatorPaymentHistoryResult>(
+    '/api/operator/payments',
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
 }
 
 export async function fetchOperatorReservations(
   accessToken: string
 ): Promise<OperatorReservationListResult> {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 8000);
-  const res = await fetch('/api/operator/reservations', {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-    cache: 'no-store',
-    signal: controller.signal,
-  });
-  window.clearTimeout(timeout);
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to fetch operator reservations.');
-  }
-
-  return data as OperatorReservationListResult;
+  const { data } = await http.get<OperatorReservationListResult>(
+    '/api/operator/reservations',
+    {
+      timeout: 8000,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
 }
 
 export async function updateOperatorReservationStatus(input: {
@@ -133,23 +131,18 @@ export async function updateOperatorReservationStatus(input: {
   reservationId: string;
   status: 'confirmed' | 'rejected' | 'picked_up';
 }) {
-  const res = await fetch('/api/operator/reservations/status', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${input.accessToken}`,
-    },
-    body: JSON.stringify({
+  const { data } = await http.post(
+    '/api/operator/reservations/status',
+    {
       reservationId: input.reservationId,
       status: input.status,
-    }),
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to update reservation.');
-  }
-
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+      },
+    }
+  );
   return data;
 }
 
@@ -158,18 +151,15 @@ export async function fetchOperatorReservationMessages(input: {
   reservationId: string;
 }): Promise<OperatorReservationMessage[]> {
   const params = new URLSearchParams({ reservationId: input.reservationId });
-  const res = await fetch(`/api/operator/reservations/chat?${params.toString()}`, {
-    headers: {
-      Authorization: `Bearer ${input.accessToken}`,
-    },
-    cache: 'no-store',
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to fetch reservation chat.');
-  }
-
+  const { data } = await http.get<{ messages?: OperatorReservationMessage[] }>(
+    `/api/operator/reservations/chat?${params.toString()}`,
+    {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
   return (data.messages || []) as OperatorReservationMessage[];
 }
 
@@ -179,77 +169,63 @@ export async function sendOperatorReservationMessage(input: {
   senderName: string;
   message: string;
 }): Promise<OperatorReservationMessage> {
-  const res = await fetch('/api/operator/reservations/chat', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${input.accessToken}`,
-    },
-    body: JSON.stringify({
+  const { data } = await http.post<{ message: OperatorReservationMessage }>(
+    '/api/operator/reservations/chat',
+    {
       reservationId: input.reservationId,
       senderName: input.senderName,
       message: input.message,
-    }),
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to send reservation chat message.');
-  }
-
-  return data.message as OperatorReservationMessage;
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+      },
+    }
+  );
+  return data.message;
 }
 
 export async function fetchOperatorBoardingPassengers(
   accessToken: string
 ): Promise<OperatorPassengersResult> {
-  const res = await fetch('/api/operator/passengers', {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-    cache: 'no-store',
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to load boarding passengers.');
-  }
-
-  return data as OperatorPassengersResult;
+  const { data } = await http.get<OperatorPassengersResult>(
+    '/api/operator/passengers',
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
 }
 
 export async function fetchOperatorUnreadChatCount(
   accessToken: string
 ): Promise<OperatorUnreadChatResult> {
-  const res = await fetch('/api/operator/chat/unread', {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-    cache: 'no-store',
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to load unread chat count.');
-  }
-
-  return data as OperatorUnreadChatResult;
+  const { data } = await http.get<OperatorUnreadChatResult>(
+    '/api/operator/chat/unread',
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
 }
 
 export async function fetchOperatorChatConversations(
   accessToken: string
 ): Promise<OperatorChatConversationsResult> {
-  const res = await fetch('/api/operator/chat/conversations', {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-    cache: 'no-store',
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to load chat conversations.');
-  }
-
-  return data as OperatorChatConversationsResult;
+  const { data } = await http.get<OperatorChatConversationsResult>(
+    '/api/operator/chat/conversations',
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
 }

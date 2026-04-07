@@ -1,3 +1,5 @@
+import { http } from '@/lib/http/client';
+
 export interface QueueEntry {
   id: string;
   operatorUserId: string;
@@ -15,14 +17,8 @@ export async function fetchActiveQueue(route?: string): Promise<QueueEntry[]> {
   const params = new URLSearchParams();
   if (route?.trim()) params.set('route', route.trim());
 
-  const res = await fetch(
+  const { data } = await http.get<{ queue?: QueueEntry[] }>(
     `/api/queue/active${params.toString() ? `?${params}` : ''}`
   );
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to fetch queue.');
-  }
-
   return (data.queue || []) as QueueEntry[];
 }

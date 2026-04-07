@@ -479,49 +479,57 @@ export default function AdminDashboard() {
               </button>
 
               {notifOpen && (
-                <div
-                  className="absolute right-0 top-11 w-[320px] max-h-[380px] overflow-y-auto rounded-2xl z-[220]"
-                  style={{
-                    background: 'var(--tg-card)',
-                    border: '1px solid var(--tg-border)',
-                    boxShadow: 'var(--tg-shadow)',
-                  }}
-                >
+                <>
+                  <button
+                    type="button"
+                    aria-label="Close notifications"
+                    onClick={() => setNotifOpen(false)}
+                    className="sm:hidden fixed inset-0 z-[210] bg-black/25"
+                  />
                   <div
-                    className="px-4 py-3 text-sm font-semibold text-theme"
-                    style={{ borderBottom: '1px solid var(--tg-border)' }}
+                    className="fixed left-3 right-3 top-[72px] max-h-[65vh] overflow-y-auto rounded-2xl z-[220] sm:absolute sm:left-auto sm:right-0 sm:top-11 sm:w-[320px] sm:max-h-[380px]"
+                    style={{
+                      background: 'var(--tg-card)',
+                      border: '1px solid var(--tg-border)',
+                      boxShadow: 'var(--tg-shadow)',
+                    }}
                   >
-                    Notifications
+                    <div
+                      className="px-4 py-3 text-sm font-semibold text-theme"
+                      style={{ borderBottom: '1px solid var(--tg-border)' }}
+                    >
+                      Notifications
+                    </div>
+                    <div className="p-2">
+                      {notifications.length === 0 ? (
+                        <p className="px-2 py-3 text-sm text-muted-theme">
+                          No notifications.
+                        </p>
+                      ) : (
+                        notifications.map((item) => (
+                          <button
+                            key={item.id}
+                            onClick={() => {
+                              setActiveTab('Applications');
+                              setApplicationsFilter('Pending');
+                              setApplicationsFilterNonce((prev) => prev + 1);
+                              setNotifOpen(false);
+                              setIsSidebarOpen(false);
+                            }}
+                            className="w-full text-left p-2 rounded-xl mb-1 cursor-pointer transition hover:opacity-90"
+                            style={{ background: 'var(--tg-bg-alt)' }}
+                          >
+                            <p className="text-sm font-semibold text-theme">{item.title}</p>
+                            <p className="text-xs text-muted-theme">{item.description}</p>
+                            <p className="text-[11px] text-muted-theme mt-1">
+                              {formatNotifTime(item.created_at)}
+                            </p>
+                          </button>
+                        ))
+                      )}
+                    </div>
                   </div>
-                  <div className="p-2">
-                    {notifications.length === 0 ? (
-                      <p className="px-2 py-3 text-sm text-muted-theme">
-                        No notifications.
-                      </p>
-                    ) : (
-                      notifications.map((item) => (
-                        <button
-                          key={item.id}
-                          onClick={() => {
-                            setActiveTab('Applications');
-                            setApplicationsFilter('Pending');
-                            setApplicationsFilterNonce((prev) => prev + 1);
-                            setNotifOpen(false);
-                            setIsSidebarOpen(false);
-                          }}
-                          className="w-full text-left p-2 rounded-xl mb-1 cursor-pointer transition hover:opacity-90"
-                          style={{ background: 'var(--tg-bg-alt)' }}
-                        >
-                          <p className="text-sm font-semibold text-theme">{item.title}</p>
-                          <p className="text-xs text-muted-theme">{item.description}</p>
-                          <p className="text-[11px] text-muted-theme mt-1">
-                            {formatNotifTime(item.created_at)}
-                          </p>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                </div>
+                </>
               )}
             </div>
             <img

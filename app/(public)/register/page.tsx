@@ -87,6 +87,7 @@ const RegisterPage = () => {
     confirmPassword: '',
   });
   const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [emailLoading, setEmailLoading] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
   const [verifyEmail, setVerifyEmail] = useState(''); // email waiting for verification
@@ -980,7 +981,7 @@ const RegisterPage = () => {
                         style={{ color: 'var(--tg-muted)' }}
                       />
                       <input
-                        type={showPassword ? 'text' : 'password'}
+                        type={showConfirmPassword ? 'text' : 'password'}
                         required
                         value={emailForm.confirmPassword}
                         onChange={(e) =>
@@ -991,8 +992,30 @@ const RegisterPage = () => {
                         }
                         placeholder="Re-enter your password"
                         className="input-dark w-full"
-                        style={{ paddingLeft: '2.25rem' }}
+                        style={{
+                          paddingLeft: '2.25rem',
+                          paddingRight: '2.5rem',
+                        }}
                       />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShowConfirmPassword((prev) => !prev)
+                        }
+                        className="absolute right-3 top-1/2 -translate-y-1/2 transition cursor-pointer"
+                        style={{ color: 'var(--tg-muted)' }}
+                        aria-label={
+                          showConfirmPassword
+                            ? 'Hide confirm password'
+                            : 'Show confirm password'
+                        }
+                      >
+                        {showConfirmPassword ? (
+                          <FaEyeSlash size={14} />
+                        ) : (
+                          <FaEye size={14} />
+                        )}
+                      </button>
                     </div>
                   </div>
 

@@ -5,14 +5,6 @@ import sileoToast from '@/lib/utils/sileo-toast';
 
 export default function AuthHashToast() {
   useEffect(() => {
-    const search = new URLSearchParams(window.location.search);
-    const authCode = search.get('code');
-    if (authCode) {
-      // Keep OAuth handling centralized in /login.
-      window.location.replace(`/login?${search.toString()}`);
-      return;
-    }
-
     const hash = window.location.hash;
     if (!hash) return;
 

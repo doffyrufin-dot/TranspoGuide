@@ -15,6 +15,7 @@ import {
 import {
   FaChair,
   FaUser,
+  FaEnvelope,
   FaPhone,
   FaMapMarkerAlt,
   FaMoneyBillWave,
@@ -132,6 +133,8 @@ const normalizePhMobile = (value: string) => {
 };
 
 const isValidPhMobile = (value: string) => /^\+639\d{9}$/.test(value.trim());
+const isValidEmail = (value: string) =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 
 /* ── Map click handler (loaded only client-side) ───────── */
 function LocationPicker({
@@ -165,6 +168,7 @@ const ReservationPage = () => {
   const [seats, setSeats] = useState<Seat[]>(INITIAL_SEATS);
   const [selectedSeatIds, setSelectedSeatIds] = useState<number[]>([]);
   const [fullName, setFullName] = useState('');
+  const [passengerEmail, setPassengerEmail] = useState('');
   const [contactNumber, setContactNumber] = useState('+63');
   const [pickupLocation, setPickupLocation] = useState('');
   const [showMap, setShowMap] = useState(false);
@@ -305,18 +309,22 @@ const ReservationPage = () => {
     let cancelled = false;
     const loadSeatStatuses = async () => {
       try {
-        const data = await fetchTripSeatStatuses(tripKey);
+        const data = await fetchTripSeatStatuses(tripKey, selectedQueue?.id || null);
         const locked = new Set(data.locked_seats || []);
         const reserved = new Set(data.reserved_seats || []);
+        const occupied = new Set(data.occupied_seats || []);
 
         const nextSeats = INITIAL_SEATS.map((seat) => {
           if (seat.label === 'D') return seat;
-          const isTaken = locked.has(seat.label) || reserved.has(seat.label);
+          const isOccupied = occupied.has(seat.label);
+          const isReserved = locked.has(seat.label) || reserved.has(seat.label);
           return {
             ...seat,
-            status: isTaken
-              ? ('reserved' as SeatStatus)
-              : ('available' as SeatStatus),
+            status: isOccupied
+              ? ('occupied' as SeatStatus)
+              : isReserved
+                ? ('reserved' as SeatStatus)
+                : ('available' as SeatStatus),
           };
         });
 
@@ -339,10 +347,11 @@ const ReservationPage = () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [hasActiveVan, tripKey]);
+  }, [hasActiveVan, tripKey, selectedQueue?.id]);
 
   const isFormValid =
     fullName.trim() &&
+    isValidEmail(passengerEmail) &&
     isValidPhMobile(contactNumber) &&
     pickupLocation.trim() &&
     selectedSeats.length > 0 &&
@@ -358,6 +367,7 @@ const ReservationPage = () => {
 
       const intent = await createReservationIntent({
         fullName,
+        passengerEmail: passengerEmail.trim().toLowerCase(),
         contactNumber,
         pickupLocation,
         route: activeRoute,
@@ -372,6 +382,7 @@ const ReservationPage = () => {
         amount: totalDown,
         seatLabels,
         fullName,
+        passengerEmail: passengerEmail.trim().toLowerCase(),
         contactNumber,
         route: activeRoute,
         reservationId: intent.reservation_id,
@@ -767,6 +778,25 @@ const ReservationPage = () => {
                   />
                 </div>
 
+                {/* Passenger email */}
+                <div>
+                  <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-2">
+                    <FaEnvelope
+                      className="inline mr-1.5"
+                      style={{ color: 'var(--primary)' }}
+                      size={11}
+                    />
+                    Email Address
+                  </label>
+                  <input
+                    type="email"
+                    value={passengerEmail}
+                    onChange={(e) => setPassengerEmail(e.target.value.trim())}
+                    placeholder="you@email.com"
+                    className="input-dark"
+                  />
+                </div>
+
                 {/* Pickup location */}
                 <div>
                   <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-2">
@@ -858,6 +888,10 @@ const ReservationPage = () => {
                 <div className="summary-row">
                   <span className="label">Contact</span>
                   <span className="value">{contactNumber || '—'}</span>
+                </div>
+                <div className="summary-row">
+                  <span className="label">Email</span>
+                  <span className="value">{passengerEmail || '—'}</span>
                 </div>
                 <div className="summary-row">
                   <span className="label">Pickup</span>

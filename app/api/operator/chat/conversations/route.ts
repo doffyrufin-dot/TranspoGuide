@@ -10,6 +10,27 @@ type QueueRow = {
   updated_at: string | null;
 };
 
+type ReservationRow = {
+  id: string;
+  full_name: string;
+  contact_number: string;
+  pickup_location: string;
+  route: string;
+  seat_count: number;
+  amount_due: number;
+  status: string;
+  created_at: string;
+  paid_at: string | null;
+  queue_id: string | null;
+};
+
+type MessageRow = {
+  reservation_id: string;
+  message: string;
+  created_at: string;
+  sender_type: 'passenger' | 'operator';
+};
+
 export async function GET(req: NextRequest) {
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -94,8 +115,57 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const reservationRows = (rows || []) as ReservationRow[];
+    const reservationIds = reservationRows.map((row) => row.id).filter(Boolean);
+
+    if (!reservationIds.length) {
+      return NextResponse.json({ conversations: [] });
+    }
+
+    const { data: messageRows, error: messageError } = await serviceClient
+      .from('tbl_reservation_messages')
+      .select('reservation_id, message, created_at, sender_type')
+      .in('reservation_id', reservationIds)
+      .order('created_at', { ascending: false })
+      .limit(800);
+
+    if (messageError) {
+      return NextResponse.json(
+        { error: messageError.message || 'Failed to load latest chat messages.' },
+        { status: 500 }
+      );
+    }
+
+    const latestByReservation = new Map<string, MessageRow>();
+    for (const row of (messageRows || []) as MessageRow[]) {
+      if (!latestByReservation.has(row.reservation_id)) {
+        latestByReservation.set(row.reservation_id, row);
+      }
+    }
+
+    const conversations = reservationRows
+      .map((row) => {
+        const latest = latestByReservation.get(row.id);
+        return {
+          ...row,
+          latest_message: latest?.message || null,
+          latest_message_at: latest?.created_at || null,
+          latest_message_sender: latest?.sender_type || null,
+        };
+      })
+      .filter((row) => !!row.latest_message_at)
+      .sort((a, b) => {
+        const aTime = new Date(
+          a.latest_message_at || a.paid_at || a.created_at
+        ).getTime();
+        const bTime = new Date(
+          b.latest_message_at || b.paid_at || b.created_at
+        ).getTime();
+        return bTime - aTime;
+      });
+
     return NextResponse.json({
-      conversations: rows || [],
+      conversations,
     });
   } catch (error: any) {
     return NextResponse.json(

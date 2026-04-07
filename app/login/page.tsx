@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 import React, { useEffect, useRef, useState } from 'react';
 import {
   supabase,
@@ -16,6 +16,8 @@ import {
   FaArrowRight,
   FaClock,
   FaSignOutAlt,
+  FaEye,
+  FaEyeSlash,
 } from 'react-icons/fa';
 
 const getAppBaseUrl = () => {
@@ -34,13 +36,13 @@ const LoginPage = () => {
   const [emailInput, setEmailInput] = useState('');
   const [forgotModalOpen, setForgotModalOpen] = useState(false);
   const [forgotEmail, setForgotEmail] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [pendingApproval, setPendingApproval] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<'pending' | 'rejected'>(
     'pending'
   );
   const [pendingEmail, setPendingEmail] = useState('');
-  const [pendingName, setPendingName] = useState('');
   const navigatingRef = useRef(false);
   const forgotEmailRef = useRef<HTMLInputElement | null>(null);
 
@@ -84,10 +86,10 @@ const LoginPage = () => {
   const redirectByRole = async (
     userId: string,
     userEmail?: string,
-    userName?: string
+    accessToken?: string
   ) => {
     try {
-      const result = await resolveUserRedirect(userId, userEmail);
+      const result = await resolveUserRedirect(userId, userEmail, accessToken);
       if (result.type === 'redirect') {
         safeNavigate(result.path);
         return;
@@ -95,7 +97,6 @@ const LoginPage = () => {
       if (result.type === 'pending') {
         setPendingStatus(result.status);
         setPendingEmail(result.email);
-        setPendingName(userName || '');
         setPendingApproval(true);
         completeAuthCheck();
         return;
@@ -135,11 +136,24 @@ const LoginPage = () => {
         const urlParams = new URLSearchParams(window.location.search);
         const oauthCode = urlParams.get('code');
 
+        const isInvalidRefreshTokenError = (error: unknown) => {
+          if (!error || typeof error !== 'object') return false;
+          const msg = String((error as { message?: string }).message || '')
+            .toLowerCase()
+            .trim();
+          return (
+            msg.includes('invalid refresh token') ||
+            msg.includes('refresh token not found')
+          );
+        };
+
+        // Always let server callback exchange OAuth code to avoid client race
+        // conditions that can trigger "Invalid Refresh Token" on Vercel.
         if (oauthCode) {
-          // Try exchange on the client, but do not hard-fail if it errors.
-          // In some cases Supabase auto-exchanges first (race), and session
-          // is already available even when this call returns an error.
-          await supabase.auth.exchangeCodeForSession(oauthCode);
+          const cb = new URLSearchParams(window.location.search);
+          cb.set('flow', 'login');
+          window.location.replace(`/auth/callback?${cb.toString()}`);
+          return;
         }
 
         // Fallback for implicit OAuth callback (#access_token in URL hash)
@@ -166,7 +180,15 @@ const LoginPage = () => {
           for (let i = 0; i < 4; i++) {
             const {
               data: { session },
+              error,
             } = await supabase.auth.getSession();
+
+            if (error && isInvalidRefreshTokenError(error)) {
+              await supabase.auth.signOut({ scope: 'local' }).catch(() => {
+                // ignore local cleanup errors
+              });
+            }
+
             if (session) return session;
             if (i < 3) {
               await new Promise((resolve) => window.setTimeout(resolve, 250));
@@ -190,30 +212,20 @@ const LoginPage = () => {
         }
 
         if (!session) {
-          if (oauthCode) {
-            // Keep OAuth code recoverable through server callback when client
-            // exchange/session bootstrap did not complete in time.
-            const cb = new URLSearchParams(window.location.search);
-            cb.set('flow', 'login');
-            window.location.replace(`/auth/callback?${cb.toString()}`);
-            return;
-          }
           const statusFromQuery = getStatusFromQuery();
           if (statusFromQuery) {
             setPendingStatus(statusFromQuery);
             setPendingEmail('');
-            setPendingName('');
             setPendingApproval(true);
           }
           completeAuthCheck();
           return;
         }
         window.history.replaceState(null, '', window.location.pathname);
-        const meta = session.user.user_metadata;
         await redirectByRole(
           session.user.id,
           session.user.email,
-          meta?.full_name || meta?.name
+          session.access_token
         );
       } catch (error) {
         if (cancelled) return;
@@ -240,11 +252,10 @@ const LoginPage = () => {
               return;
             }
             window.history.replaceState(null, '', window.location.pathname);
-            const meta = session.user.user_metadata;
             await redirectByRole(
               session.user.id,
               session.user.email,
-              meta?.full_name || meta?.name
+              session.access_token
             );
           } catch (error) {
             if (cancelled) return;
@@ -281,8 +292,8 @@ const LoginPage = () => {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        // Return to /login and exchange code there for consistent behavior.
-        redirectTo: `${appBaseUrl}/login`,
+        // Always return to callback so code exchange + redirect stay deterministic.
+        redirectTo: `${appBaseUrl}/auth/callback?flow=login`,
         queryParams: {
           access_type: 'offline',
           prompt: 'consent',
@@ -337,7 +348,11 @@ const LoginPage = () => {
         return;
       }
       if (data.session) {
-        await redirectByRole(data.session.user.id, email);
+        await redirectByRole(
+          data.session.user.id,
+          email,
+          data.session.access_token
+        );
       }
     } finally {
       if (!navigatingRef.current) {
@@ -526,10 +541,10 @@ const LoginPage = () => {
   }
 
   return (
-    <main className="min-h-screen flex">
+    <main className="min-h-screen flex login-anim-page">
       {/* Left branding panel */}
       <div
-        className="hidden lg:flex flex-col justify-between w-[480px] shrink-0 relative overflow-hidden p-12"
+        className="hidden lg:flex flex-col justify-between w-[480px] shrink-0 relative overflow-hidden p-12 login-anim-left"
         style={{
           background: 'linear-gradient(160deg, var(--primary-dark), #0a1a3a)',
         }}
@@ -596,12 +611,12 @@ const LoginPage = () => {
           </div>
         </div>
         <p className="relative text-white/30 text-xs">
-          © {new Date().getFullYear()} TranspoGuide
+          Â© {new Date().getFullYear()} TranspoGuide
         </p>
       </div>
 
       {/* Right form panel */}
-      <div className="flex-1 flex items-center justify-center px-6 py-20">
+      <div className="flex-1 flex items-center justify-center px-6 py-20 login-anim-right">
         <div className="w-full max-w-md">
           <div className="lg:hidden text-center mb-8">
             <span className="text-2xl font-bold text-theme">
@@ -635,14 +650,31 @@ const LoginPage = () => {
                 <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-2">
                   Password
                 </label>
-                <input
-                  type="password"
-                  name="password"
-                  placeholder="••••••••"
-                  className="input-dark"
-                  disabled={loading}
-                  required
-                />
+                <div className="relative">
+                  <input
+                    type={showLoginPassword ? 'text' : 'password'}
+                    name="password"
+                    placeholder="Enter your password"
+                    className="input-dark pr-12"
+                    disabled={loading}
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword((prev) => !prev)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 transition cursor-pointer"
+                    style={{ color: 'var(--tg-muted)' }}
+                    aria-label={
+                      showLoginPassword ? 'Hide password' : 'Show password'
+                    }
+                  >
+                    {showLoginPassword ? (
+                      <FaEyeSlash size={14} />
+                    ) : (
+                      <FaEye size={14} />
+                    )}
+                  </button>
+                </div>
               </div>
               <div className="flex items-center justify-between text-sm">
                 <label className="flex items-center gap-2.5 cursor-pointer group">
@@ -809,3 +841,4 @@ const LoginPage = () => {
 };
 
 export default LoginPage;
+

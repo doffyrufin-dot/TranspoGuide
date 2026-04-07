@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
 const hiddenStatuses = ['cancelled', 'rejected', 'picked_up'];
+const activeQueueStatuses = ['boarding', 'queued'];
 
 export async function GET(req: NextRequest) {
   try {
@@ -39,11 +40,11 @@ export async function GET(req: NextRequest) {
 
     const { data: queueRows, error: queueError } = await serviceClient
       .from('tbl_van_queue')
-      .select('id, route, plate_number, departure_time, status')
+      .select('id, route, plate_number, departure_time, status, created_at, updated_at')
       .eq('operator_user_id', user.id)
-      .eq('status', 'boarding')
+      .in('status', activeQueueStatuses)
       .order('updated_at', { ascending: false })
-      .limit(1);
+      .limit(5);
 
     if (queueError) {
       return NextResponse.json(
@@ -52,7 +53,17 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const currentQueue = queueRows?.[0];
+    const prioritizedQueues = [...(queueRows || [])].sort((a, b) => {
+      const rankA = a.status === 'boarding' ? 0 : 1;
+      const rankB = b.status === 'boarding' ? 0 : 1;
+      if (rankA !== rankB) return rankA - rankB;
+
+      const timeA = new Date(a.updated_at || a.created_at || 0).getTime();
+      const timeB = new Date(b.updated_at || b.created_at || 0).getTime();
+      return timeB - timeA;
+    });
+
+    const currentQueue = prioritizedQueues[0];
     if (!currentQueue) {
       return NextResponse.json({
         queue: null,

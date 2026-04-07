@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { useTheme } from './ThemeProvider';
 
 const SunIcon = () => (
@@ -17,22 +18,51 @@ const SunIcon = () => (
 );
 
 const MoonIcon = () => (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
   </svg>
 );
 
 const ThemeToggle = () => {
   const { theme, toggle } = useTheme();
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const isDark = mounted && theme === 'dark';
+  const label = mounted
+    ? isDark
+      ? 'Switch to light mode'
+      : 'Switch to dark mode'
+    : 'Toggle theme';
+  const title = mounted ? (isDark ? 'Light mode' : 'Dark mode') : 'Theme';
 
   return (
     <button
       onClick={toggle}
       className="theme-toggle"
-      aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-      title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+      aria-label={label}
+      title={title}
+      suppressHydrationWarning
     >
-      {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+      <span className="relative inline-flex h-4 w-4 items-center justify-center">
+        <span
+          className={`absolute transition-all duration-300 ease-out ${
+            isDark ? 'opacity-100 scale-100 rotate-0' : 'opacity-0 scale-75 -rotate-45'
+          }`}
+        >
+          <SunIcon />
+        </span>
+        <span
+          className={`absolute transition-all duration-300 ease-out ${
+            isDark ? 'opacity-0 scale-75 rotate-45' : 'opacity-100 scale-100 rotate-0'
+          }`}
+        >
+          <MoonIcon />
+        </span>
+      </span>
     </button>
   );
 };
