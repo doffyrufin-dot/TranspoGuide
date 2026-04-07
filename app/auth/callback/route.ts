@@ -6,15 +6,66 @@ import {
   resolvePathFromAuthState,
 } from '@/lib/server/auth-redirect';
 
+const normalizeBaseUrl = (value: string) => value.replace(/\/+$/, '');
+const toValidBaseUrl = (value: string) => {
+  try {
+    return normalizeBaseUrl(new URL(value).toString());
+  } catch {
+    return '';
+  }
+};
+
+const isLocalHostname = (hostname: string) =>
+  hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+
+const isLocalUrl = (value: string) => {
+  try {
+    return isLocalHostname(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+};
+
+const resolveRequestOrigin = (request: NextRequest) => {
+  const envUrlRaw = (
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.APP_URL ||
+    ''
+  ).trim();
+  const envUrl = envUrlRaw ? toValidBaseUrl(envUrlRaw) : '';
+
+  const forwardedHost = (
+    request.headers.get('x-forwarded-host') || request.headers.get('host') || ''
+  ).trim();
+  const forwardedProto = (request.headers.get('x-forwarded-proto') || '').trim();
+
+  if (forwardedHost) {
+    const protocol =
+      forwardedProto || (forwardedHost.includes('localhost') ? 'http' : 'https');
+    const forwardedOrigin = normalizeBaseUrl(`${protocol}://${forwardedHost}`);
+
+    // If env is stale localhost but request is from a public host, trust request host.
+    if (envUrl && isLocalUrl(envUrl) && !isLocalUrl(forwardedOrigin)) {
+      return forwardedOrigin;
+    }
+
+    if (!envUrl) return forwardedOrigin;
+  }
+
+  if (envUrl) return envUrl;
+  return normalizeBaseUrl(new URL(request.url).origin);
+};
+
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url);
+  const requestOrigin = resolveRequestOrigin(request);
   const code = requestUrl.searchParams.get('code');
   const debug = requestUrl.searchParams.get('debug') === '1';
   const flow = requestUrl.searchParams.get('flow');
   const fallbackPath = flow === 'register' ? '/register' : '/login';
 
   const redirectWithReason = (path: string, reason: string) => {
-    const target = new URL(path, request.url);
+    const target = new URL(path, requestOrigin);
     if (debug) target.searchParams.set('cb', reason);
     return NextResponse.redirect(target);
   };

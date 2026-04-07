@@ -33,11 +33,39 @@ interface AuthUser {
   avatar: string;
 }
 
+const normalizeBaseUrl = (value: string) => value.replace(/\/+$/, '');
+const toValidBaseUrl = (value: string) => {
+  try {
+    return normalizeBaseUrl(new URL(value).toString());
+  } catch {
+    return '';
+  }
+};
+
+const isLocalHostname = (hostname: string) =>
+  hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+
+const isLocalUrl = (value: string) => {
+  try {
+    return isLocalHostname(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+};
+
 const getAppBaseUrl = () => {
-  const envUrl = (process.env.NEXT_PUBLIC_APP_URL || '').trim();
-  if (envUrl) return envUrl.replace(/\/+$/, '');
-  if (typeof window !== 'undefined') return window.location.origin;
-  return '';
+  const envUrlRaw = (process.env.NEXT_PUBLIC_APP_URL || '').trim();
+  const envUrl = envUrlRaw ? toValidBaseUrl(envUrlRaw) : '';
+
+  if (typeof window !== 'undefined') {
+    const browserOrigin = normalizeBaseUrl(window.location.origin);
+    if (!envUrl) return browserOrigin;
+    // Guard against stale env values like localhost in production deployments.
+    if (isLocalUrl(envUrl) && !isLocalUrl(browserOrigin)) return browserOrigin;
+    return envUrl;
+  }
+
+  return envUrl;
 };
 
 const hasStrongPassword = (value: string) => {
