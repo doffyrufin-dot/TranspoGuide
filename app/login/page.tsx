@@ -19,6 +19,7 @@ import {
   FaEye,
   FaEyeSlash,
 } from 'react-icons/fa';
+import Link from 'next/link';
 
 const normalizeBaseUrl = (value: string) => value.replace(/\/+$/, '');
 const toValidBaseUrl = (value: string) => {
@@ -598,8 +599,10 @@ const LoginPage = () => {
               <FaRoute size={16} />
             </div>
             <span className="text-xl font-bold text-white">
-              Transpo
-              <span style={{ color: 'var(--primary-light)' }}>Guide</span>
+              <Link href={'/'}>
+                Transpo
+                <span style={{ color: 'var(--primary-light)' }}>Guide</span>
+              </Link>
             </span>
           </div>
           <h2 className="text-3xl font-extrabold text-white leading-tight mb-4">
@@ -869,4 +872,3 @@ const LoginPage = () => {
 };
 
 export default LoginPage;
-

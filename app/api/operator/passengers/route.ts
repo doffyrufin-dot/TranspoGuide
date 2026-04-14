@@ -3,6 +3,26 @@ import { createClient } from '@supabase/supabase-js';
 
 const hiddenStatuses = ['cancelled', 'rejected', 'picked_up'];
 const activeQueueStatuses = ['boarding', 'queued'];
+const DEFAULT_PAGE_SIZE = 10;
+const MAX_PAGE_SIZE = 50;
+
+const toTimeLabel = (value?: string | null) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString('en-PH', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const toPositiveInt = (value: string | null, fallback: number) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  const normalized = Math.floor(parsed);
+  if (normalized <= 0) return fallback;
+  return normalized;
+};
 
 export async function GET(req: NextRequest) {
   try {
@@ -18,6 +38,12 @@ export async function GET(req: NextRequest) {
     const token = authHeader.startsWith('Bearer ')
       ? authHeader.slice(7).trim()
       : '';
+    const requestedPage = toPositiveInt(req.nextUrl.searchParams.get('page'), 1);
+    const requestedPageSize = toPositiveInt(
+      req.nextUrl.searchParams.get('pageSize'),
+      DEFAULT_PAGE_SIZE
+    );
+    const pageSize = Math.min(requestedPageSize, MAX_PAGE_SIZE);
     if (!token) {
       return NextResponse.json({ error: 'missing_auth_token' }, { status: 401 });
     }
@@ -68,25 +94,97 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({
         queue: null,
         passengers: [],
+        pagination: {
+          page: 1,
+          pageSize,
+          total: 0,
+          totalPages: 1,
+          hasNext: false,
+          hasPrev: false,
+        },
+        activeTripKey: null,
       });
     }
 
-    const { data: reservationRows, error: reservationError } = await serviceClient
-      .from('tbl_reservations')
-      .select(
-        'id, full_name, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at'
-      )
-      .eq('operator_user_id', user.id)
-      .eq('queue_id', currentQueue.id)
-      .not('status', 'in', `(${hiddenStatuses.join(',')})`)
-      .order('created_at', { ascending: false })
-      .limit(200);
+    const departureLabel = toTimeLabel(currentQueue.departure_time || null);
+    const todayTripDate = new Date().toISOString().slice(0, 10);
+    const departureDate = currentQueue.departure_time
+      ? new Date(currentQueue.departure_time)
+      : null;
+    const departureTripDate =
+      departureDate && !Number.isNaN(departureDate.getTime())
+        ? departureDate.toISOString().slice(0, 10)
+        : '';
+
+    const tripKeyCandidates =
+      currentQueue.route && departureLabel
+        ? Array.from(
+            new Set(
+              [todayTripDate, departureTripDate]
+                .filter(Boolean)
+                .map(
+                  (tripDate) =>
+                    `${currentQueue.route}|${departureLabel}|${tripDate}`
+                )
+            )
+          )
+        : [];
+
+    const activeTripKey = tripKeyCandidates[0] || null;
+
+    const buildReservationQuery = () => {
+      let query = serviceClient
+        .from('tbl_reservations')
+        .select(
+          'id, full_name, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at',
+          { count: 'exact' }
+        )
+        .eq('operator_user_id', user.id)
+        .eq('queue_id', currentQueue.id)
+        .not('status', 'in', `(${hiddenStatuses.join(',')})`);
+
+      if (tripKeyCandidates.length === 1) {
+        query = query.eq('trip_key', tripKeyCandidates[0]);
+      } else if (tripKeyCandidates.length > 1) {
+        query = query.in('trip_key', tripKeyCandidates);
+      }
+      return query;
+    };
+
+    const fetchPassengerPage = async (page: number) => {
+      const from = (page - 1) * pageSize;
+      const to = from + pageSize - 1;
+      return buildReservationQuery()
+        .order('created_at', { ascending: false })
+        .range(from, to);
+    };
+
+    let page = requestedPage;
+    const firstPageResult = await fetchPassengerPage(page);
+    let reservationRows = firstPageResult.data;
+    let reservationError = firstPageResult.error;
 
     if (reservationError) {
       return NextResponse.json(
         { error: reservationError.message || 'Failed to load passengers.' },
         { status: 500 }
       );
+    }
+
+    const total = Number(firstPageResult.count || 0);
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+    if (total > 0 && page > totalPages) {
+      page = totalPages;
+      const retry = await fetchPassengerPage(page);
+      reservationRows = retry.data;
+      reservationError = retry.error;
+      if (reservationError) {
+        return NextResponse.json(
+          { error: reservationError.message || 'Failed to load passengers.' },
+          { status: 500 }
+        );
+      }
     }
 
     return NextResponse.json({
@@ -98,6 +196,15 @@ export async function GET(req: NextRequest) {
         status: currentQueue.status || 'boarding',
       },
       passengers: reservationRows || [],
+      pagination: {
+        page,
+        pageSize,
+        total,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+      },
+      activeTripKey,
     });
   } catch (error: any) {
     return NextResponse.json(

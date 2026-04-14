@@ -22,7 +22,8 @@ create table if not exists public.tbl_reservations (
   lock_expires_at timestamptz,
   paid_at timestamptz,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  operator_chat_seen_at timestamptz
 );
 
 create table if not exists public.tbl_seat_locks (

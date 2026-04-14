@@ -20,6 +20,13 @@ const isPaidLike = (status?: string | null) => {
 
 export async function GET(req: NextRequest) {
   try {
+    const pageParam = Number(req.nextUrl.searchParams.get('page') || '1');
+    const pageSizeParam = Number(req.nextUrl.searchParams.get('pageSize') || '10');
+    const page = Number.isFinite(pageParam) ? Math.max(1, Math.floor(pageParam)) : 1;
+    const pageSize = Number.isFinite(pageSizeParam)
+      ? Math.max(1, Math.min(50, Math.floor(pageSizeParam)))
+      : 10;
+
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -70,6 +77,12 @@ export async function GET(req: NextRequest) {
 
     const rows = (data || []) as ReservationRow[];
     const paidRows = rows.filter((r) => isPaidLike(r.status));
+    const total = paidRows.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.min(page, totalPages);
+    const startIndex = (safePage - 1) * pageSize;
+    const endIndex = startIndex + pageSize;
+    const pagedRows = paidRows.slice(startIndex, endIndex);
 
     const now = new Date();
     const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -90,7 +103,7 @@ export async function GET(req: NextRequest) {
         week: sumFrom(startOfWeek),
         month: sumFrom(startOfMonth),
       },
-      payments: paidRows.map((row) => ({
+      payments: pagedRows.map((row) => ({
         id: row.id,
         passenger: row.full_name || 'Passenger',
         route: row.route || '-',
@@ -101,6 +114,14 @@ export async function GET(req: NextRequest) {
         paidAt: row.paid_at,
         createdAt: row.created_at,
       })),
+      pagination: {
+        page: safePage,
+        pageSize,
+        total,
+        totalPages,
+        hasNext: safePage < totalPages,
+        hasPrev: safePage > 1,
+      },
     });
   } catch (error: any) {
     return NextResponse.json(

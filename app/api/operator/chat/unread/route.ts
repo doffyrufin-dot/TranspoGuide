@@ -6,6 +6,7 @@ type ReservationRow = {
   full_name: string | null;
   route: string | null;
   status: string | null;
+  operator_chat_seen_at?: string | null;
 };
 
 type QueueRow = {
@@ -23,6 +24,10 @@ type MessageRow = {
 
 const CHAT_GRACE_MINUTES = 30;
 const ACTIVE_QUEUE_STATUSES = ['queued', 'boarding'];
+const isMissingSeenColumnError = (error: unknown) => {
+  const msg = String((error as { message?: string } | null)?.message || '').toLowerCase();
+  return msg.includes('operator_chat_seen_at') && msg.includes('column');
+};
 
 export async function GET(req: NextRequest) {
   try {
@@ -94,23 +99,46 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const { data: reservationRows, error: reservationError } = await serviceClient
+    let supportsSeenTracking = true;
+    let reservationRows: ReservationRow[] = [];
+
+    const reservationRead = await serviceClient
       .from('tbl_reservations')
-      .select('id, full_name, route, status, queue_id')
+      .select('id, full_name, route, status, queue_id, operator_chat_seen_at')
       .eq('operator_user_id', user.id)
       .in('queue_id', eligibleQueueIds)
       .not('status', 'in', '(cancelled,rejected,picked_up)')
       .order('created_at', { ascending: false })
       .limit(120);
 
-    if (reservationError) {
+    if (reservationRead.error && isMissingSeenColumnError(reservationRead.error)) {
+      supportsSeenTracking = false;
+      const fallbackRead = await serviceClient
+        .from('tbl_reservations')
+        .select('id, full_name, route, status, queue_id')
+        .eq('operator_user_id', user.id)
+        .in('queue_id', eligibleQueueIds)
+        .not('status', 'in', '(cancelled,rejected,picked_up)')
+        .order('created_at', { ascending: false })
+        .limit(120);
+
+      if (fallbackRead.error) {
+        return NextResponse.json(
+          { error: fallbackRead.error.message || 'Failed to load reservations.' },
+          { status: 500 }
+        );
+      }
+      reservationRows = (fallbackRead.data || []) as ReservationRow[];
+    } else if (reservationRead.error) {
       return NextResponse.json(
-        { error: reservationError.message || 'Failed to load reservations.' },
+        { error: reservationRead.error.message || 'Failed to load reservations.' },
         { status: 500 }
       );
+    } else {
+      reservationRows = (reservationRead.data || []) as ReservationRow[];
     }
 
-    const reservations = (reservationRows || []) as ReservationRow[];
+    const reservations = reservationRows;
     const reservationIds = reservations.map((row) => row.id).filter(Boolean);
     if (!reservationIds.length) {
       return NextResponse.json({
@@ -134,12 +162,22 @@ export async function GET(req: NextRequest) {
     }
 
     const allMessages = (messageRows || []) as MessageRow[];
+    const reservationMap = new Map(
+      reservations.map((row) => [row.id, row] as const)
+    );
     const latestByReservation = new Map<string, MessageRow>();
+    const messagesByReservation = new Map<string, MessageRow[]>();
     const unreadByReservation = new Map<string, number>();
 
     for (const row of allMessages) {
       if (!latestByReservation.has(row.reservation_id)) {
         latestByReservation.set(row.reservation_id, row);
+      }
+      const existing = messagesByReservation.get(row.reservation_id);
+      if (existing) {
+        existing.push(row);
+      } else {
+        messagesByReservation.set(row.reservation_id, [row]);
       }
       if (unreadByReservation.has(row.reservation_id)) {
         continue;
@@ -147,20 +185,37 @@ export async function GET(req: NextRequest) {
       unreadByReservation.set(row.reservation_id, 0);
     }
 
-    // Count newest consecutive passenger messages until first operator reply.
+    // Seen-aware unread count: count passenger messages after operator opened the chat.
+    // Fallback to legacy behavior if the seen column is not yet available.
     for (const reservationId of reservationIds) {
+      const rowsForReservation = messagesByReservation.get(reservationId) || [];
       let count = 0;
-      for (const row of allMessages) {
-        if (row.reservation_id !== reservationId) continue;
-        if (row.sender_type === 'operator') break;
-        if (row.sender_type === 'passenger') count += 1;
+
+      if (!supportsSeenTracking) {
+        for (const row of rowsForReservation) {
+          if (row.sender_type === 'operator') break;
+          if (row.sender_type === 'passenger') count += 1;
+        }
+        unreadByReservation.set(reservationId, count);
+        continue;
+      }
+
+      const seenAtRaw = reservationMap.get(reservationId)?.operator_chat_seen_at || null;
+      const seenAtMs = seenAtRaw ? new Date(seenAtRaw).getTime() : 0;
+      const hasSeenAt = Boolean(seenAtMs && !Number.isNaN(seenAtMs));
+
+      for (const row of rowsForReservation) {
+        if (row.sender_type !== 'passenger') continue;
+        if (hasSeenAt) {
+          const messageMs = new Date(row.created_at).getTime();
+          if (!Number.isNaN(messageMs) && messageMs <= seenAtMs) {
+            continue;
+          }
+        }
+        count += 1;
       }
       unreadByReservation.set(reservationId, count);
     }
-
-    const reservationMap = new Map(
-      reservations.map((row) => [row.id, row] as const)
-    );
 
     const unreadThreads = [...latestByReservation.entries()]
       .filter(([reservationId, message]) => {

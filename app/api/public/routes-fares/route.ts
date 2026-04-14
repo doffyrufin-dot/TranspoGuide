@@ -1,6 +1,35 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
+const estimateBarangayFareByVehicle = (
+  vehicleType: string,
+  distanceKm: number,
+  tricycleFare: number
+) => {
+  const key = (vehicleType || '').toLowerCase();
+  if (key.includes('trycicle') || key.includes('tricycle')) {
+    return tricycleFare;
+  }
+
+  const farePerKmMap: Record<string, number> = {
+    bus: 3.2,
+    minibus: 3.4,
+    van: 3.8,
+    jeep: 2.8,
+    multicab: 2.6,
+  };
+
+  const matched = Object.keys(farePerKmMap).find((k) => key.includes(k));
+  if (!matched || !Number.isFinite(distanceKm) || distanceKm <= 0) {
+    return tricycleFare;
+  }
+
+  const estimated = distanceKm * farePerKmMap[matched];
+  return Number.isFinite(estimated) && estimated > 0
+    ? Number(estimated.toFixed(2))
+    : tricycleFare;
+};
+
 export async function GET() {
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -105,6 +134,11 @@ export async function GET() {
       return normalized.map((vehicleType) => {
         const vehicleKey = vehicleType.toLowerCase();
         const genericFare = genericBarangayVehicleFareMap.get(vehicleKey);
+        const estimatedVehicleFare = estimateBarangayFareByVehicle(
+          vehicleType,
+          distance,
+          tricycleFare
+        );
         return {
           id: `barangay-${row.id}-${vehicleType.toLowerCase()}`,
           origin: 'Isabel',
@@ -113,7 +147,7 @@ export async function GET() {
           regular_fare:
             vehicleKey.includes('trycicle') || vehicleKey.includes('tricycle')
               ? tricycleFare
-              : Number(genericFare?.regular_fare || tricycleFare),
+              : Number(genericFare?.regular_fare || estimatedVehicleFare),
           discount_rate: Number(genericFare?.discount_rate || 0.2),
           distance_km: distance,
           source: 'barangay_fare',

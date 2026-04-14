@@ -522,7 +522,7 @@ export async function listReservationsByOperator(
   const { data, error } = await supabase
     .from('tbl_reservations')
     .select(
-      'id, full_name, passenger_email, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at'
+      'id, full_name, passenger_email, contact_number, pickup_location, route, seat_labels, seat_count, amount_due, status, payment_id, created_at, paid_at'
     )
     .eq('operator_user_id', operatorUserId)
     .order('created_at', { ascending: false })
@@ -639,7 +639,7 @@ export async function updateReservationStatusByOperator(input: {
   const allowedCurrentStatuses =
     input.status === 'picked_up'
       ? ['confirmed', 'pending_operator_approval', 'paid']
-      : ['pending_payment', 'pending_operator_approval', 'paid'];
+      : ['pending_operator_approval', 'paid'];
 
   const { data: rows, error } = await supabase
     .from('tbl_reservations')

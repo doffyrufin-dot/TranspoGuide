@@ -15,6 +15,7 @@ import {
   fetchOperatorBoardingPassengers,
   fetchOperatorChatConversations,
   fetchOperatorUnreadChatCount,
+  markOperatorReservationChatSeen,
   fetchOperatorPaymentHistory,
   fetchOperatorReservationMessages,
   fetchOperatorReservations,
@@ -39,7 +40,6 @@ import {
   LogOut,
   Bell,
   Check,
-  X,
   Phone,
   Clock,
   User,
@@ -54,6 +54,7 @@ import {
   MessageCircle,
   SendHorizontal,
   Smile,
+  Eye,
 } from 'lucide-react';
 
 const LeafletMapContainer = dynamic<any>(
@@ -298,7 +299,13 @@ export default function OperatorDashboard() {
 
   const renderContent = () => {
       switch (activeView) {
-      case 'Reservations': return <ReservationsContent accessToken={sessionToken} />;
+      case 'Reservations':
+        return (
+          <ReservationsContent
+            accessToken={sessionToken}
+            operatorUserId={operatorUserId}
+          />
+        );
       case 'Passengers':
         return (
           <PassengersContent
@@ -712,12 +719,61 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     }
   };
 
+  const clearLocalUnreadForReservation = (reservationId: string) => {
+    const targetId = String(reservationId || '').trim();
+    if (!targetId) return;
+    setUnreadByReservation((prev) => {
+      const currentUnread = Number(prev[targetId] || 0);
+      if (currentUnread <= 0) return prev;
+      const next = { ...prev, [targetId]: 0 };
+      const nextThreadCount = Object.values(next).filter((value) => Number(value || 0) > 0)
+        .length;
+      setUnreadThreadCount(nextThreadCount);
+      return next;
+    });
+  };
+
+  const markThreadSeen = async (
+    reservationId?: string,
+    options?: { silent?: boolean }
+  ) => {
+    const targetId = (reservationId || chatReservationId || '').trim();
+    if (!targetId || !accessToken) return;
+    try {
+      await markOperatorReservationChatSeen({
+        accessToken,
+        reservationId: targetId,
+      });
+      clearLocalUnreadForReservation(targetId);
+    } catch {
+      if (!options?.silent) {
+        sileoToast.error({
+          title: 'Unable to mark chat as seen',
+          description: 'Please try again.',
+        });
+      }
+    }
+  };
+
   const loadUnreadCount = async (silent = true) => {
     if (!accessToken) return;
     try {
       const result = await fetchOperatorUnreadChatCount(accessToken);
-      setUnreadThreadCount(Number(result.unreadThreadCount || 0));
-      setUnreadByReservation(result.unreadByReservation || {});
+      const nextUnreadByReservation = {
+        ...(result.unreadByReservation || {}),
+      } as Record<string, number>;
+      const activeReservationId = (chatOpenRef.current
+        ? activeReservationRef.current
+        : ''
+      ).trim();
+      if (activeReservationId) {
+        nextUnreadByReservation[activeReservationId] = 0;
+      }
+      const nextThreadCount = Object.values(nextUnreadByReservation).filter(
+        (value) => Number(value || 0) > 0
+      ).length;
+      setUnreadThreadCount(nextThreadCount);
+      setUnreadByReservation(nextUnreadByReservation);
     } catch {
       if (!silent) {
         sileoToast.error({
@@ -742,6 +798,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
         reservationId: targetId,
       });
       setChatMessages(rows || []);
+      await markThreadSeen(targetId, { silent: true });
     } catch (error: any) {
       if (!silent) {
         sileoToast.error({
@@ -946,10 +1003,13 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
           const reservationId = String(row.reservation_id || '').trim();
           if (!reservationId) return;
 
-          if (
+          const isActiveOpenThread =
             chatOpenRef.current &&
             activeReservationRef.current &&
-            activeReservationRef.current === reservationId &&
+            activeReservationRef.current === reservationId;
+
+          if (
+            isActiveOpenThread &&
             row.id &&
             row.message &&
             row.created_at
@@ -969,6 +1029,14 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
                 },
               ])
             );
+            void markThreadSeen(reservationId, { silent: true });
+          }
+
+          if (isActiveOpenThread) {
+            if (chatOpenRef.current) {
+              void loadReservations(true);
+            }
+            return;
           }
 
           setUnreadByReservation((prev) => {
@@ -1117,13 +1185,8 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
                             type="button"
                             onClick={() => {
                               setChatReservationId(r.id);
-                              setUnreadByReservation((prev) => ({
-                                ...prev,
-                                [r.id]: 0,
-                              }));
-                              if (unread > 0) {
-                                setUnreadThreadCount((prev) => Math.max(0, prev - 1));
-                              }
+                              clearLocalUnreadForReservation(r.id);
+                              void markThreadSeen(r.id, { silent: true });
                             }}
                             className="w-full rounded-xl px-3 py-2 text-left transition cursor-pointer border"
                             style={{
@@ -1382,12 +1445,21 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    RESERVATIONS
 â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
-function ReservationsContent({ accessToken }: { accessToken: string }) {
+function ReservationsContent({
+  accessToken,
+  operatorUserId,
+}: {
+  accessToken: string;
+  operatorUserId: string;
+}) {
   const [activeTab, setActiveTab] = useState<'pending' | 'history'>('pending');
   const [loading, setLoading] = useState(true);
   const [actionLoadingId, setActionLoadingId] = useState('');
   const [pendingReservations, setPendingReservations] = useState<OperatorReservationRecord[]>([]);
   const [pastReservations, setPastReservations] = useState<OperatorReservationRecord[]>([]);
+  const [viewModalOpen, setViewModalOpen] = useState(false);
+  const [viewReservation, setViewReservation] = useState<OperatorReservationRecord | null>(null);
+  const [modalActionStatus, setModalActionStatus] = useState<'confirmed' | 'rejected' | null>(null);
 
   const formatPeso = (value: number) =>
     `PHP ${Number(value || 0).toLocaleString('en-PH', {
@@ -1395,10 +1467,52 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
       maximumFractionDigits: 2,
     })}`;
 
-  const loadReservations = async () => {
+  const getSeatText = (reservation: OperatorReservationRecord) => {
+    const seatLabels = Array.isArray(reservation.seat_labels)
+      ? reservation.seat_labels.map((seat) => String(seat || '').trim()).filter(Boolean)
+      : [];
+    if (seatLabels.length > 0) return seatLabels.join(', ');
+    const seatCount = Number(reservation.seat_count || 0);
+    if (seatCount > 0) return `${seatCount} seat(s)`;
+    return '-';
+  };
+
+  const formatReservationStatus = (status?: string | null) => {
+    const normalized = String(status || '').toLowerCase();
+    if (normalized === 'pending_operator_approval') return 'Pending Approval';
+    if (normalized === 'pending_payment') return 'Pending Payment';
+    if (normalized === 'picked_up') return 'Picked Up';
+    if (normalized === 'departed') return 'Departed';
+    if (!normalized) return 'Unknown';
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  };
+
+  const isReviewableStatus = (status?: string | null) => {
+    const normalized = String(status || '').toLowerCase();
+    return (
+      normalized === 'pending_payment' ||
+      normalized === 'pending_operator_approval' ||
+      normalized === 'paid'
+    );
+  };
+
+  const openDetailsModal = (reservation: OperatorReservationRecord) => {
+    setViewReservation(reservation);
+    setViewModalOpen(true);
+  };
+
+  const closeDetailsModal = () => {
+    if (viewReservation && actionLoadingId === viewReservation.id) return;
+    setViewModalOpen(false);
+    setViewReservation(null);
+    setModalActionStatus(null);
+  };
+
+  const loadReservations = useCallback(async (options?: { silent?: boolean }) => {
     if (!accessToken) return;
+    const silent = !!options?.silent;
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const data = await fetchOperatorReservations(accessToken);
       setPendingReservations(data.pending || []);
       setPastReservations(data.history || []);
@@ -1408,17 +1522,53 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
         description: error?.message || 'Please try again.',
       });
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    void loadReservations();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken]);
 
-  const handleAction = async (reservationId: string, status: 'confirmed' | 'rejected') => {
-    if (!accessToken || !reservationId || actionLoadingId) return;
+  useEffect(() => {
+    void loadReservations({ silent: false });
+  }, [loadReservations]);
+
+  useEffect(() => {
+    if (!accessToken || !operatorUserId) return;
+
+    let refreshTimeout: number | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimeout) return;
+      refreshTimeout = window.setTimeout(() => {
+        refreshTimeout = null;
+        void loadReservations({ silent: true });
+      }, 250);
+    };
+
+    const reservationsChannel = supabase
+      .channel(`operator-reservations-${operatorUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_reservations',
+          filter: `operator_user_id=eq.${operatorUserId}`,
+        },
+        scheduleRefresh
+      )
+      .subscribe();
+
+    return () => {
+      if (refreshTimeout) {
+        window.clearTimeout(refreshTimeout);
+      }
+      void supabase.removeChannel(reservationsChannel);
+    };
+  }, [accessToken, operatorUserId, loadReservations]);
+
+  const handleAction = async (
+    reservationId: string,
+    status: 'confirmed' | 'rejected'
+  ) => {
+    if (!accessToken || !reservationId || actionLoadingId) return false;
     try {
       setActionLoadingId(reservationId);
       await updateOperatorReservationStatus({
@@ -1430,14 +1580,24 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
         title: status === 'confirmed' ? 'Reservation confirmed' : 'Reservation rejected',
       });
       await loadReservations();
+      return true;
     } catch (error: any) {
       sileoToast.error({
         title: 'Action failed',
         description: error?.message || 'Please try again.',
       });
+      return false;
     } finally {
       setActionLoadingId('');
     }
+  };
+
+  const handleModalAction = async (status: 'confirmed' | 'rejected') => {
+    if (!viewReservation) return;
+    setModalActionStatus(status);
+    const ok = await handleAction(viewReservation.id, status);
+    setModalActionStatus(null);
+    if (ok) closeDetailsModal();
   };
 
 
@@ -1556,17 +1716,19 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
                       <td className="p-4 text-right">
                         <div className="flex items-center justify-end gap-2">
                           <button
-                            disabled={actionLoadingId === res.id}
-                            onClick={() => handleAction(res.id, 'rejected')}
-                            className="p-2 rounded-xl cursor-pointer transition hover:scale-105 disabled:opacity-50"
-                            style={{ background: 'rgba(239,68,68,0.1)', color: '#ef4444' }}>
-                            <X size={16} />
-                          </button>
-                          <button
-                            disabled={actionLoadingId === res.id}
-                            onClick={() => handleAction(res.id, 'confirmed')}
-                            className="btn-primary shadow-none text-xs py-2 px-4 disabled:opacity-50">
-                            <Check size={14} /> Confirm
+                            type="button"
+                            onClick={() => openDetailsModal(res)}
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition"
+                            style={{
+                              background: 'var(--tg-subtle)',
+                              color: 'var(--primary)',
+                              border: '1px solid var(--tg-border-primary)',
+                            }}
+                          >
+                            <span className="inline-flex items-center gap-1">
+                              <Eye size={13} />
+                              View
+                            </span>
                           </button>
                         </div>
                       </td>
@@ -1596,12 +1758,29 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
                       <span className="text-theme font-medium">{formatPeso(Number(res.amount_due || 0))}</span>
                     </td>
                     <td className="p-4 text-right">
-                      <span className="px-2.5 py-1 rounded-full text-xs font-bold"
-                        style={(res.status || '').toLowerCase() === 'confirmed'
-                          ? { background: 'rgba(34,197,94,0.12)', color: '#22c55e' }
-                          : { background: 'rgba(239,68,68,0.12)', color: '#ef4444' }}>
-                        {String(res.status || '').toLowerCase() === 'confirmed' ? 'Confirmed' : 'Rejected'}
-                      </span>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openDetailsModal(res)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition"
+                          style={{
+                            background: 'var(--tg-subtle)',
+                            color: 'var(--primary)',
+                            border: '1px solid var(--tg-border-primary)',
+                          }}
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            <Eye size={13} />
+                            View
+                          </span>
+                        </button>
+                        <span className="px-2.5 py-1 rounded-full text-xs font-bold"
+                          style={(res.status || '').toLowerCase() === 'confirmed'
+                            ? { background: 'rgba(34,197,94,0.12)', color: '#22c55e' }
+                            : { background: 'rgba(239,68,68,0.12)', color: '#ef4444' }}>
+                          {String(res.status || '').toLowerCase() === 'confirmed' ? 'Confirmed' : 'Rejected'}
+                        </span>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -1638,19 +1817,16 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
                   </span>
                   <div className="flex gap-2">
                     <button
-                      disabled={actionLoadingId === res.id}
-                      onClick={() => handleAction(res.id, 'rejected')}
-                      className="p-2 rounded-lg disabled:opacity-50"
-                      style={{ background: 'rgba(239,68,68,0.12)', color: '#ef4444' }}
+                      type="button"
+                      onClick={() => openDetailsModal(res)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold"
+                      style={{
+                        background: 'var(--tg-subtle)',
+                        color: 'var(--primary)',
+                        border: '1px solid var(--tg-border-primary)',
+                      }}
                     >
-                      <X size={14} />
-                    </button>
-                    <button
-                      disabled={actionLoadingId === res.id}
-                      onClick={() => handleAction(res.id, 'confirmed')}
-                      className="btn-primary text-xs py-1.5 px-3 disabled:opacity-50"
-                    >
-                      Confirm
+                      View
                     </button>
                   </div>
                 </div>
@@ -1667,10 +1843,144 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
               <p className="text-theme font-semibold">{res.full_name}</p>
               <p className="text-muted-theme text-xs">{res.route}</p>
               <p className="text-theme text-sm">{formatPeso(Number(res.amount_due || 0))}</p>
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => openDetailsModal(res)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    color: 'var(--primary)',
+                    border: '1px solid var(--tg-border-primary)',
+                  }}
+                >
+                  View
+                </button>
+              </div>
             </div>
           ))
         )}
       </div>
+
+      {viewModalOpen &&
+        viewReservation &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="fixed inset-0 z-[250] flex items-center justify-center px-4">
+            <button
+              type="button"
+              aria-label="Close reservation details"
+              className="absolute inset-0"
+              style={{ background: 'rgba(2, 8, 23, 0.55)' }}
+              onClick={closeDetailsModal}
+            />
+            <div
+              className="relative w-full max-w-2xl rounded-2xl overflow-hidden"
+              style={{
+                background: 'var(--tg-card)',
+                border: '1px solid var(--tg-border)',
+                boxShadow: 'var(--tg-shadow)',
+              }}
+            >
+              <div
+                className="px-5 py-4 flex items-start justify-between gap-3"
+                style={{ borderBottom: '1px solid var(--tg-border)' }}
+              >
+                <div>
+                  <h4 className="text-theme font-bold text-base">Reservation Details</h4>
+                  <p className="text-muted-theme text-xs mt-1">
+                    {viewReservation.full_name || 'Passenger'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeDetailsModal}
+                  disabled={actionLoadingId === viewReservation.id}
+                  className="p-2 rounded-lg transition hover:bg-[var(--tg-subtle)] cursor-pointer"
+                  style={{ color: 'var(--tg-muted)' }}
+                >
+                  <CloseIcon size={16} />
+                </button>
+              </div>
+
+              <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Contact</p>
+                  <p className="text-theme font-semibold">{viewReservation.contact_number || '-'}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Route</p>
+                  <p className="text-theme font-semibold">{viewReservation.route || '-'}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Seat Number(s)</p>
+                  <p className="text-theme font-semibold">{getSeatText(viewReservation)}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Downpayment Reference</p>
+                  <p className="text-theme font-semibold">{(viewReservation.payment_id || '').trim() || '-'}</p>
+                </div>
+                <div className="p-3 rounded-xl md:col-span-2" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Pickup Location</p>
+                  <p className="text-theme font-semibold">{viewReservation.pickup_location || '-'}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Amount</p>
+                  <p className="text-theme font-semibold">{formatPeso(Number(viewReservation.amount_due || 0))}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Status</p>
+                  <p className="text-theme font-semibold">{formatReservationStatus(viewReservation.status)}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Created</p>
+                  <p className="text-theme font-semibold">
+                    {new Date(viewReservation.created_at).toLocaleString('en-PH')}
+                  </p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Paid At</p>
+                  <p className="text-theme font-semibold">
+                    {viewReservation.paid_at
+                      ? new Date(viewReservation.paid_at).toLocaleString('en-PH')
+                      : '-'}
+                  </p>
+                </div>
+              </div>
+              {isReviewableStatus(viewReservation.status) && (
+                <div
+                  className="px-5 py-4 flex items-center justify-end gap-2"
+                  style={{ borderTop: '1px solid var(--tg-border)' }}
+                >
+                  <button
+                    type="button"
+                    disabled={actionLoadingId === viewReservation.id}
+                    onClick={() => void handleModalAction('rejected')}
+                    className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                    style={{ background: 'rgba(239,68,68,0.12)', color: '#ef4444' }}
+                  >
+                    {actionLoadingId === viewReservation.id &&
+                    modalActionStatus === 'rejected'
+                      ? 'Rejecting...'
+                      : 'Reject'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={actionLoadingId === viewReservation.id}
+                    onClick={() => void handleModalAction('confirmed')}
+                    className="btn-primary shadow-none text-xs py-2 px-4 disabled:opacity-50"
+                  >
+                    {actionLoadingId === viewReservation.id &&
+                    modalActionStatus === 'confirmed'
+                      ? 'Confirming...'
+                      : 'Confirm'}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>,
+          document.body
+        )}
 
     </div>
   );
@@ -1683,9 +1993,14 @@ function PassengersContent({
   accessToken: string;
   operatorUserId: string;
 }) {
+  const PASSENGERS_PAGE_SIZE = 10;
   const [loading, setLoading] = useState(true);
   const [queueInfo, setQueueInfo] = useState<OperatorBoardingQueueInfo | null>(null);
   const [passengers, setPassengers] = useState<OperatorBoardingPassenger[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPassengers, setTotalPassengers] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [activeTripKey, setActiveTripKey] = useState<string | null>(null);
   const [rowActionLoadingId, setRowActionLoadingId] = useState<string | null>(null);
   const [mapModalOpen, setMapModalOpen] = useState(false);
   const [mapLoading, setMapLoading] = useState(false);
@@ -1710,6 +2025,62 @@ function PassengersContent({
     return [lat, lng];
   };
 
+  const normalizePickupText = (value: string) =>
+    value
+      .replace(/\s+/g, ' ')
+      .replace(/\b(pick\s*up|pickup|location|loc)\b[:\-]?\s*/gi, '')
+      .trim();
+
+  const routePlacesFromHint = (routeHint: string) => {
+    const cleaned = String(routeHint || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleaned) return [];
+
+    const parts = cleaned
+      .split(/\bto\b|->|—|-/i)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    return Array.from(new Set(parts));
+  };
+
+  const geocodeWithNominatim = async (
+    query: string
+  ): Promise<[number, number] | null> => {
+    const q = encodeURIComponent(query);
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${q}&limit=5&countrycodes=ph&addressdetails=1`,
+      {
+        cache: 'no-store',
+        headers: {
+          'Accept-Language': 'en',
+        },
+      }
+    );
+    if (!response.ok) return null;
+
+    const rows = (await response.json()) as Array<{
+      lat?: string;
+      lon?: string;
+      display_name?: string;
+    }>;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+
+    const preferred = rows.find((row) =>
+      String(row.display_name || '')
+        .toLowerCase()
+        .includes('leyte')
+    );
+    const winner = preferred || rows[0];
+    if (!winner?.lat || !winner?.lon) return null;
+
+    const lat = Number(winner.lat);
+    const lng = Number(winner.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    return [lat, lng];
+  };
+
   const resolvePickupCoordinates = async (
     pickupLocation: string,
     routeHint: string
@@ -1717,51 +2088,87 @@ function PassengersContent({
     const parsed = parseCoordinatesFromText(pickupLocation);
     if (parsed) return parsed;
 
-    const queryParts = [pickupLocation.trim(), routeHint.trim(), 'Leyte, Philippines'].filter(
-      Boolean
-    );
-    if (queryParts.length === 0) return null;
+    const pickup = normalizePickupText(pickupLocation);
+    if (!pickup) return null;
 
-    const q = encodeURIComponent(queryParts.join(', '));
-    const response = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`,
-      { cache: 'no-store' }
+    const routePlaces = routePlacesFromHint(routeHint);
+    const queries = Array.from(
+      new Set(
+        [
+          pickup,
+          `${pickup}, Isabel, Leyte, Philippines`,
+          `${pickup}, Leyte, Philippines`,
+          `${pickup}, Philippines`,
+          ...routePlaces.map((place) => `${pickup}, ${place}, Leyte, Philippines`),
+          ...routePlaces.map((place) => `${pickup}, ${place}, Philippines`),
+        ]
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
     );
-    if (!response.ok) return null;
 
-    const rows = (await response.json()) as Array<{ lat?: string; lon?: string }>;
-    const first = rows?.[0];
-    if (!first?.lat || !first?.lon) return null;
-    const lat = Number(first.lat);
-    const lng = Number(first.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-    return [lat, lng];
+    for (const query of queries) {
+      try {
+        const coords = await geocodeWithNominatim(query);
+        if (coords) return coords;
+      } catch {
+        // Try next query variant.
+      }
+    }
+
+    return null;
   };
 
-  const loadPassengers = useCallback(async (silent = false) => {
-    if (!accessToken) return;
-    try {
-      if (!silent) setLoading(true);
-      const result = await fetchOperatorBoardingPassengers(accessToken);
-      setQueueInfo(result.queue || null);
-      setPassengers(result.passengers || []);
-    } catch (err: unknown) {
-      if (!silent) {
-        sileoToast.error({
-          title: 'Failed to load passengers',
-          description: err instanceof Error ? err.message : 'Please try again.',
+  const loadPassengers = useCallback(
+    async (options?: { silent?: boolean; page?: number }) => {
+      if (!accessToken) return;
+      const silent = !!options?.silent;
+      const targetPage = Math.max(1, Number(options?.page || currentPage || 1));
+      try {
+        if (!silent) setLoading(true);
+        const result = await fetchOperatorBoardingPassengers(accessToken, {
+          page: targetPage,
+          pageSize: PASSENGERS_PAGE_SIZE,
         });
+        setQueueInfo(result.queue || null);
+        setPassengers(result.passengers || []);
+        setActiveTripKey(result.activeTripKey || null);
+
+        const pageInfo = result.pagination;
+        const nextTotal = Number(pageInfo?.total || 0);
+        const nextTotalPages = Math.max(1, Number(pageInfo?.totalPages || 1));
+        const nextPage = Math.min(
+          nextTotalPages,
+          Math.max(1, Number(pageInfo?.page || targetPage))
+        );
+
+        setTotalPassengers(nextTotal);
+        setTotalPages(nextTotalPages);
+        if (nextPage !== currentPage) {
+          setCurrentPage(nextPage);
+        }
+      } catch (err: unknown) {
+        if (!silent) {
+          sileoToast.error({
+            title: 'Failed to load passengers',
+            description: err instanceof Error ? err.message : 'Please try again.',
+          });
+        }
+        setQueueInfo(null);
+        setPassengers([]);
+        setActiveTripKey(null);
+        setTotalPassengers(0);
+        setTotalPages(1);
+      } finally {
+        if (!silent) setLoading(false);
       }
-      setQueueInfo(null);
-      setPassengers([]);
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  }, [accessToken]);
+    },
+    [accessToken, currentPage]
+  );
 
   useEffect(() => {
-    void loadPassengers(false);
-  }, [loadPassengers]);
+    void loadPassengers({ silent: false, page: currentPage });
+  }, [loadPassengers, currentPage]);
 
   useEffect(() => {
     if (!accessToken || !operatorUserId) return;
@@ -1771,7 +2178,7 @@ function PassengersContent({
       if (refreshTimeout) return;
       refreshTimeout = window.setTimeout(() => {
         refreshTimeout = null;
-        void loadPassengers(true);
+        void loadPassengers({ silent: true, page: currentPage });
       }, 250);
     };
 
@@ -1810,7 +2217,7 @@ function PassengersContent({
       void supabase.removeChannel(reservationsChannel);
       void supabase.removeChannel(queueChannel);
     };
-  }, [accessToken, operatorUserId, loadPassengers]);
+  }, [accessToken, operatorUserId, loadPassengers, currentPage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1881,7 +2288,7 @@ function PassengersContent({
         title: 'Passenger marked as picked up',
         description: `${row.full_name || 'Passenger'} was moved to completed pickup.`,
       });
-      await loadPassengers(true);
+      await loadPassengers({ silent: true, page: currentPage });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Please try again.';
       sileoToast.error({
@@ -1904,7 +2311,7 @@ function PassengersContent({
             </p>
           </div>
           <button
-            onClick={() => void loadPassengers(false)}
+            onClick={() => void loadPassengers({ silent: false, page: currentPage })}
             disabled={loading}
             className="px-3 py-2 rounded-xl text-xs font-semibold cursor-pointer"
             style={{
@@ -1919,33 +2326,40 @@ function PassengersContent({
         </div>
 
         {queueInfo ? (
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div
-              className="p-3 rounded-xl"
-              style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
-            >
-              <p className="text-xs text-muted-theme uppercase mb-1">Route</p>
-              <p className="text-sm font-semibold text-theme">{queueInfo.route || '-'}</p>
+          <>
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div
+                className="p-3 rounded-xl"
+                style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
+              >
+                <p className="text-xs text-muted-theme uppercase mb-1">Route</p>
+                <p className="text-sm font-semibold text-theme">{queueInfo.route || '-'}</p>
+              </div>
+              <div
+                className="p-3 rounded-xl"
+                style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
+              >
+                <p className="text-xs text-muted-theme uppercase mb-1">Plate</p>
+                <p className="text-sm font-semibold text-theme">{queueInfo.plate_number || '-'}</p>
+              </div>
+              <div
+                className="p-3 rounded-xl"
+                style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
+              >
+                <p className="text-xs text-muted-theme uppercase mb-1">Departure</p>
+                <p className="text-sm font-semibold text-theme">
+                  {queueInfo.departure_time
+                    ? new Date(queueInfo.departure_time).toLocaleString('en-PH')
+                    : 'TBD'}
+                </p>
+              </div>
             </div>
-            <div
-              className="p-3 rounded-xl"
-              style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
-            >
-              <p className="text-xs text-muted-theme uppercase mb-1">Plate</p>
-              <p className="text-sm font-semibold text-theme">{queueInfo.plate_number || '-'}</p>
-            </div>
-            <div
-              className="p-3 rounded-xl"
-              style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
-            >
-              <p className="text-xs text-muted-theme uppercase mb-1">Departure</p>
-              <p className="text-sm font-semibold text-theme">
-                {queueInfo.departure_time
-                  ? new Date(queueInfo.departure_time).toLocaleString('en-PH')
-                  : 'TBD'}
+            {activeTripKey && (
+              <p className="mt-3 text-xs text-muted-theme">
+                Showing reservations for this exact trip slot only.
               </p>
-            </div>
-          </div>
+            )}
+          </>
         ) : (
           <div
             className="mt-4 p-4 rounded-xl text-sm"
@@ -2059,6 +2473,55 @@ function PassengersContent({
             </tbody>
           </table>
         </div>
+        {queueInfo && (
+          <div
+            className="px-4 py-3 flex items-center justify-between gap-3"
+            style={{ borderTop: '1px solid var(--tg-border)' }}
+          >
+            <p className="text-xs text-muted-theme">
+              Page {currentPage} of {totalPages} • {totalPassengers} passenger
+              {totalPassengers === 1 ? '' : 's'}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  void loadPassengers({
+                    silent: false,
+                    page: Math.max(1, currentPage - 1),
+                  })
+                }
+                disabled={loading || currentPage <= 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  color: 'var(--primary)',
+                  border: '1px solid var(--tg-border-primary)',
+                }}
+              >
+                Prev
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void loadPassengers({
+                    silent: false,
+                    page: Math.min(totalPages, currentPage + 1),
+                  })
+                }
+                disabled={loading || currentPage >= totalPages}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  color: 'var(--primary)',
+                  border: '1px solid var(--tg-border-primary)',
+                }}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {mapModalOpen &&
@@ -2852,23 +3315,43 @@ function MyVehicleContent({
   );
 }
 function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
+  const PAYMENTS_PAGE_SIZE = 10;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [summary, setSummary] = useState({ today: 0, week: 0, month: 0 });
   const [payments, setPayments] = useState<OperatorPaymentRecord[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalPayments, setTotalPayments] = useState(0);
 
   useEffect(() => {
     if (!accessToken) return;
     let cancelled = false;
+    const targetPage = Math.max(1, currentPage);
 
     const load = async () => {
       try {
         setLoading(true);
         setError('');
-        const data = await fetchOperatorPaymentHistory(accessToken);
+        const data = await fetchOperatorPaymentHistory(accessToken, {
+          page: targetPage,
+          pageSize: PAYMENTS_PAGE_SIZE,
+        });
         if (cancelled) return;
         setSummary(data.summary);
         setPayments(data.payments || []);
+        const pageInfo = data.pagination;
+        const nextTotal = Number(pageInfo?.total || 0);
+        const nextTotalPages = Math.max(1, Number(pageInfo?.totalPages || 1));
+        const nextPage = Math.min(
+          nextTotalPages,
+          Math.max(1, Number(pageInfo?.page || targetPage))
+        );
+        setTotalPayments(nextTotal);
+        setTotalPages(nextTotalPages);
+        if (nextPage !== currentPage) {
+          setCurrentPage(nextPage);
+        }
       } catch (err: any) {
         if (cancelled) return;
         setError(err?.message || 'Failed to load payment history.');
@@ -2881,7 +3364,7 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
     return () => {
       cancelled = true;
     };
-  }, [accessToken]);
+  }, [accessToken, currentPage]);
 
   const formatPeso = (value: number) =>
     `PHP ${Number(value || 0).toLocaleString('en-PH', {
@@ -2921,39 +3404,78 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
         ) : payments.length === 0 ? (
           <p className="text-sm text-muted-theme">No paid reservations yet.</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr style={{ borderBottom: '2px solid var(--tg-border)' }}>
-                  <th className="text-left p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Passenger</th>
-                  <th className="text-left p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Route</th>
-                  <th className="text-center p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Seats</th>
-                  <th className="text-right p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Amount</th>
-                  <th className="text-right p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Paid Date</th>
-                </tr>
-              </thead>
-              <tbody>
-                {payments.map((payment) => (
-                  <tr
-                    key={payment.id}
-                    style={{ borderBottom: '1px solid var(--tg-border)' }}
-                    className="hover:bg-[var(--tg-subtle)] transition-colors"
-                  >
-                    <td className="p-3 text-theme font-medium">{payment.passenger}</td>
-                    <td className="p-3 text-theme">{payment.route}</td>
-                    <td className="p-3 text-center">
-                      <span className="step-badge text-xs">{payment.seats}</span>
-                    </td>
-                    <td className="p-3 text-right font-bold" style={{ color: '#22c55e' }}>
-                      {formatPeso(payment.amount)}
-                    </td>
-                    <td className="p-3 text-right text-muted-theme">
-                      {new Date(payment.paidAt || payment.createdAt).toLocaleString('en-PH')}
-                    </td>
+          <div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr style={{ borderBottom: '2px solid var(--tg-border)' }}>
+                    <th className="text-left p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Passenger</th>
+                    <th className="text-left p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Route</th>
+                    <th className="text-center p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Seats</th>
+                    <th className="text-right p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Amount</th>
+                    <th className="text-right p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Paid Date</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {payments.map((payment) => (
+                    <tr
+                      key={payment.id}
+                      style={{ borderBottom: '1px solid var(--tg-border)' }}
+                      className="hover:bg-[var(--tg-subtle)] transition-colors"
+                    >
+                      <td className="p-3 text-theme font-medium">{payment.passenger}</td>
+                      <td className="p-3 text-theme">{payment.route}</td>
+                      <td className="p-3 text-center">
+                        <span className="step-badge text-xs">{payment.seats}</span>
+                      </td>
+                      <td className="p-3 text-right font-bold" style={{ color: '#22c55e' }}>
+                        {formatPeso(payment.amount)}
+                      </td>
+                      <td className="p-3 text-right text-muted-theme">
+                        {new Date(payment.paidAt || payment.createdAt).toLocaleString('en-PH')}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div
+              className="mt-3 px-1 flex items-center justify-between gap-3"
+              style={{ borderTop: '1px solid var(--tg-border)' }}
+            >
+              <p className="text-xs text-muted-theme pt-3">
+                Page {currentPage} of {totalPages} • {totalPayments} payment
+                {totalPayments === 1 ? '' : 's'}
+              </p>
+              <div className="flex items-center gap-2 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={loading || currentPage <= 1}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    color: 'var(--primary)',
+                    border: '1px solid var(--tg-border-primary)',
+                  }}
+                >
+                  Prev
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={loading || currentPage >= totalPages}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    color: 'var(--primary)',
+                    border: '1px solid var(--tg-border-primary)',
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>

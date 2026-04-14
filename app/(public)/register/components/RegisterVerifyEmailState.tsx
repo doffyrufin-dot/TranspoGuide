@@ -5,11 +5,15 @@ import { FaEnvelope } from 'react-icons/fa';
 
 type RegisterVerifyEmailStateProps = {
   verifyEmail: string;
+  resendLoading: boolean;
+  onResendVerification: () => void;
   onUseDifferentEmail: () => void;
 };
 
 export default function RegisterVerifyEmailState({
   verifyEmail,
+  resendLoading,
+  onResendVerification,
   onUseDifferentEmail,
 }: RegisterVerifyEmailStateProps) {
   return (
@@ -43,6 +47,16 @@ export default function RegisterVerifyEmailState({
             >
               Didn&apos;t get it? Check your spam folder.
             </div>
+            <button
+              onClick={onResendVerification}
+              disabled={resendLoading}
+              className="btn-primary w-full text-sm"
+              style={
+                resendLoading ? { opacity: 0.65, cursor: 'not-allowed' } : {}
+              }
+            >
+              {resendLoading ? 'Resending...' : 'Resend confirmation email'}
+            </button>
 
             <button
               onClick={onUseDifferentEmail}

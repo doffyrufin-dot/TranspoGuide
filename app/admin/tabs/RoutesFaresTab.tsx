@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { supabase } from '@/utils/supabase/client';
 import sileoToast from '@/lib/utils/sileo-toast';
-import { Bus, Map as MapIcon, Plus, Trash2 } from 'lucide-react';
+import { Bus, Map as MapIcon, Pencil, Plus, Trash2, X } from 'lucide-react';
 
 type VehicleTypeRow = { id: string; name: string; image_url: string | null; is_active: boolean };
 type DestinationRow = {
@@ -74,13 +75,34 @@ const normalizeName = (value: string) =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join(' ');
 
+const ROUTE_EDIT_INITIAL = {
+  distance_km: '',
+  travel_time_minutes: '',
+  regular_fare: '',
+  discount_rate: '0.20',
+};
+
+const BARANGAY_EDIT_INITIAL = {
+  barangay_name: '',
+  distance_km: '',
+  tricycle_base_fare: '15',
+  per_km_increase: '2',
+  is_highway: true,
+  allowed_vehicle_types: ['Bus', 'Minibus', 'Multicab', 'Trycicle'] as string[],
+};
+
 export default function RoutesFaresTab() {
+  const [isClient, setIsClient] = useState(false);
   const [loading, setLoading] = useState(true);
   const [lookupLoading, setLookupLoading] = useState(true);
   const [routeSaving, setRouteSaving] = useState(false);
   const [barangaySaving, setBarangaySaving] = useState(false);
   const [routeDeletingId, setRouteDeletingId] = useState('');
   const [barangayDeletingId, setBarangayDeletingId] = useState('');
+  const [routeEditingRow, setRouteEditingRow] = useState<RouteFareRow | null>(null);
+  const [routeUpdating, setRouteUpdating] = useState(false);
+  const [barangayEditingRow, setBarangayEditingRow] = useState<BarangayFareRow | null>(null);
+  const [barangayUpdating, setBarangayUpdating] = useState(false);
   const [routeRows, setRouteRows] = useState<RouteFareRow[]>([]);
   const [barangayRows, setBarangayRows] = useState<BarangayFareRow[]>([]);
   const [vehicleTypes, setVehicleTypes] = useState<VehicleTypeRow[]>([]);
@@ -95,6 +117,8 @@ export default function RoutesFaresTab() {
     regular_fare: '',
     discount_rate: '0.20',
   });
+  const [routeEditForm, setRouteEditForm] = useState(ROUTE_EDIT_INITIAL);
+  const [barangayEditForm, setBarangayEditForm] = useState(BARANGAY_EDIT_INITIAL);
   const [barangayForm, setBarangayForm] = useState({
     barangay_name: '',
     distance_km: '',
@@ -193,6 +217,10 @@ export default function RoutesFaresTab() {
   };
 
   useEffect(() => {
+    setIsClient(true);
+  }, []);
+
+  useEffect(() => {
     void loadAll();
     void loadLookups();
   }, []);
@@ -275,7 +303,9 @@ export default function RoutesFaresTab() {
         tricycle_base_fare: base,
         per_km_increase: perKm,
         is_highway: barangayForm.is_highway,
-        allowed_vehicle_types: barangayForm.is_highway ? barangayForm.allowed_vehicle_types : [],
+        allowed_vehicle_types: barangayForm.is_highway
+          ? barangayForm.allowed_vehicle_types
+          : [],
         is_active: true,
       });
       if (error) throw error;
@@ -290,9 +320,232 @@ export default function RoutesFaresTab() {
       sileoToast.success({ title: 'Barangay fare added' });
       await loadAll();
     } catch (error: any) {
-      sileoToast.error({ title: 'Save failed', description: error?.message || 'Unable to add barangay fare.' });
+      sileoToast.error({
+        title: 'Save failed',
+        description: error?.message || 'Unable to add barangay fare.',
+      });
     } finally {
       setBarangaySaving(false);
+    }
+  };
+
+  const openRouteEditModal = (row: RouteFareRow) => {
+    const currentDistance = Number(row.distance_km || 0);
+    const vehicleName = row.vehicle?.name || row.vehicle_type;
+    setRouteEditingRow(row);
+    setRouteEditForm({
+      distance_km: row.distance_km == null ? '' : String(row.distance_km),
+      travel_time_minutes:
+        currentDistance > 0
+          ? String(computeTravelMinutes(currentDistance, vehicleName))
+          : '',
+      regular_fare: String(row.regular_fare || ''),
+      discount_rate: String(row.discount_rate ?? 0.2),
+    });
+  };
+
+  const closeRouteEditModal = () => {
+    if (routeUpdating) return;
+    setRouteEditingRow(null);
+    setRouteEditForm(ROUTE_EDIT_INITIAL);
+  };
+
+  const saveRouteEdit = async () => {
+    if (!routeEditingRow) return;
+
+    const distance = Number(routeEditForm.distance_km);
+    const travelMinutes = Number(routeEditForm.travel_time_minutes);
+    const fare = Number(routeEditForm.regular_fare);
+    const discount = Number(routeEditForm.discount_rate || 0.2);
+
+    if (!Number.isFinite(distance) || distance <= 0) {
+      sileoToast.warning({
+        title: 'Invalid distance',
+        description: 'Distance must be greater than 0 km.',
+      });
+      return;
+    }
+    if (!Number.isFinite(travelMinutes) || travelMinutes <= 0) {
+      sileoToast.warning({
+        title: 'Invalid travel time',
+        description: 'Travel time must be greater than 0 minute.',
+      });
+      return;
+    }
+    if (!Number.isFinite(fare) || fare <= 0) {
+      sileoToast.warning({
+        title: 'Invalid fare',
+        description: 'Regular fare must be greater than 0.',
+      });
+      return;
+    }
+    if (!Number.isFinite(discount) || discount < 0 || discount > 1) {
+      sileoToast.warning({
+        title: 'Invalid discount',
+        description: 'Discount rate must be from 0 to 1.',
+      });
+      return;
+    }
+
+    setRouteUpdating(true);
+    try {
+      const { error } = await supabase
+        .from('tbl_route_fares')
+        .update({
+          distance_km: distance,
+          regular_fare: fare,
+          discount_rate: discount,
+        })
+        .eq('id', routeEditingRow.id);
+      if (error) throw error;
+
+      await fetch('/api/public/route-metrics', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          routes: [
+            {
+              origin: routeEditingRow.origin,
+              destination: routeEditingRow.destination,
+              vehicle_type: routeEditingRow.vehicle?.name || routeEditingRow.vehicle_type,
+              distance_km: distance,
+              regular_fare: fare,
+              travel_time_minutes: travelMinutes,
+            },
+          ],
+        }),
+      }).catch(() => null);
+
+      setRouteRows((prev) =>
+        prev.map((item) =>
+          item.id === routeEditingRow.id
+            ? {
+                ...item,
+                distance_km: distance,
+                regular_fare: fare,
+                discount_rate: discount,
+              }
+            : item
+        )
+      );
+
+      sileoToast.success({ title: 'Route fare updated' });
+      setRouteEditingRow(null);
+      setRouteEditForm(ROUTE_EDIT_INITIAL);
+    } catch (error: any) {
+      sileoToast.error({
+        title: 'Update failed',
+        description: error?.message || 'Unable to update route fare.',
+      });
+    } finally {
+      setRouteUpdating(false);
+    }
+  };
+
+  const openBarangayEditModal = (row: BarangayFareRow) => {
+    setBarangayEditingRow(row);
+    setBarangayEditForm({
+      barangay_name: row.barangay_name,
+      distance_km: String(row.distance_km ?? ''),
+      tricycle_base_fare: String(row.tricycle_base_fare ?? '15'),
+      per_km_increase: String(row.per_km_increase ?? '2'),
+      is_highway: !!row.is_highway,
+      allowed_vehicle_types: row.is_highway
+        ? ((row.allowed_vehicle_types || []).filter((item) =>
+            HIGHWAY_OPTIONS.includes(item as any)
+          ) as string[])
+        : [],
+    });
+  };
+
+  const closeBarangayEditModal = () => {
+    if (barangayUpdating) return;
+    setBarangayEditingRow(null);
+    setBarangayEditForm(BARANGAY_EDIT_INITIAL);
+  };
+
+  const saveBarangayEdit = async () => {
+    if (!barangayEditingRow) return;
+
+    const name = normalizeName(barangayEditForm.barangay_name);
+    const distance = Number(barangayEditForm.distance_km);
+    const base = Number(barangayEditForm.tricycle_base_fare);
+    const perKm = Number(barangayEditForm.per_km_increase);
+
+    if (!name) {
+      sileoToast.warning({
+        title: 'Missing barangay',
+        description: 'Please input barangay name.',
+      });
+      return;
+    }
+    if (!Number.isFinite(distance) || distance < 0) {
+      sileoToast.warning({
+        title: 'Invalid distance',
+        description: 'Distance must be 0 or higher.',
+      });
+      return;
+    }
+    if (!Number.isFinite(base) || base < 0) {
+      sileoToast.warning({
+        title: 'Invalid base fare',
+        description: 'Base fare must be 0 or higher.',
+      });
+      return;
+    }
+    if (!Number.isFinite(perKm) || perKm < 0) {
+      sileoToast.warning({
+        title: 'Invalid per-km fare',
+        description: 'Per-km increase must be 0 or higher.',
+      });
+      return;
+    }
+
+    setBarangayUpdating(true);
+    try {
+      const { error } = await supabase
+        .from('tbl_barangay_fares')
+        .update({
+          barangay_name: name,
+          distance_km: distance,
+          tricycle_base_fare: base,
+          per_km_increase: perKm,
+          is_highway: barangayEditForm.is_highway,
+          allowed_vehicle_types: barangayEditForm.is_highway
+            ? barangayEditForm.allowed_vehicle_types
+            : [],
+        })
+        .eq('id', barangayEditingRow.id);
+      if (error) throw error;
+
+      setBarangayRows((prev) =>
+        prev.map((item) =>
+          item.id === barangayEditingRow.id
+            ? {
+                ...item,
+                barangay_name: name,
+                distance_km: distance,
+                tricycle_base_fare: base,
+                per_km_increase: perKm,
+                is_highway: barangayEditForm.is_highway,
+                allowed_vehicle_types: barangayEditForm.is_highway
+                  ? barangayEditForm.allowed_vehicle_types
+                  : [],
+              }
+            : item
+        )
+      );
+
+      sileoToast.success({ title: 'Barangay fare updated' });
+      setBarangayEditingRow(null);
+      setBarangayEditForm(BARANGAY_EDIT_INITIAL);
+    } catch (error: any) {
+      sileoToast.error({
+        title: 'Update failed',
+        description: error?.message || 'Unable to update barangay fare.',
+      });
+    } finally {
+      setBarangayUpdating(false);
     }
   };
 
@@ -302,6 +555,10 @@ export default function RoutesFaresTab() {
       const { error } = await supabase.from('tbl_route_fares').update({ is_active: false }).eq('id', row.id);
       if (error) throw error;
       setRouteRows((prev) => prev.filter((item) => item.id !== row.id));
+      if (routeEditingRow?.id === row.id) {
+        setRouteEditingRow(null);
+        setRouteEditForm(ROUTE_EDIT_INITIAL);
+      }
       sileoToast.success({ title: 'Route fare removed' });
     } catch (error: any) {
       sileoToast.error({ title: 'Delete failed', description: error?.message || 'Unable to remove route fare.' });
@@ -316,6 +573,10 @@ export default function RoutesFaresTab() {
       const { error } = await supabase.from('tbl_barangay_fares').update({ is_active: false }).eq('id', row.id);
       if (error) throw error;
       setBarangayRows((prev) => prev.filter((item) => item.id !== row.id));
+      if (barangayEditingRow?.id === row.id) {
+        setBarangayEditingRow(null);
+        setBarangayEditForm(BARANGAY_EDIT_INITIAL);
+      }
       sileoToast.success({ title: 'Barangay fare removed' });
     } catch (error: any) {
       sileoToast.error({ title: 'Delete failed', description: error?.message || 'Unable to remove barangay fare.' });
@@ -498,9 +759,35 @@ export default function RoutesFaresTab() {
                           <td className="p-4 text-center">{formatMoney(v.regular_fare)}</td>
                           <td className="p-4 text-center">{formatMoney(discountedFare)}</td>
                           <td className="p-4 text-right">
-                            <button onClick={() => void removeRouteFare(v)} disabled={routeDeletingId === v.id} className="text-sm font-medium cursor-pointer inline-flex items-center gap-1" style={{ color: '#ef4444' }}>
-                              <Trash2 size={13} /> Delete
-                            </button>
+                            <div className="inline-flex items-center gap-2">
+                              <button
+                                onClick={() => openRouteEditModal(v)}
+                                className="p-1.5 rounded-md cursor-pointer"
+                                style={{
+                                  color: 'var(--primary)',
+                                  background: 'var(--tg-subtle)',
+                                  border: '1px solid var(--tg-border)',
+                                }}
+                                title="Edit route fare"
+                                aria-label="Edit route fare"
+                              >
+                                <Pencil size={13} />
+                              </button>
+                              <button
+                                onClick={() => void removeRouteFare(v)}
+                                disabled={routeDeletingId === v.id}
+                                className="p-1.5 rounded-md cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                                style={{
+                                  color: '#ef4444',
+                                  background: 'var(--tg-subtle)',
+                                  border: '1px solid var(--tg-border)',
+                                }}
+                                title="Delete route fare"
+                                aria-label="Delete route fare"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -591,9 +878,35 @@ export default function RoutesFaresTab() {
                       {row.is_highway ? (row.allowed_vehicle_types || []).join(', ') || '--' : '--'}
                     </td>
                     <td className="p-4 text-right">
-                      <button onClick={() => void removeBarangayFare(row)} disabled={barangayDeletingId === row.id} className="text-sm font-medium cursor-pointer inline-flex items-center gap-1" style={{ color: '#ef4444' }}>
-                        <Trash2 size={13} /> Delete
-                      </button>
+                      <div className="inline-flex items-center gap-2">
+                        <button
+                          onClick={() => openBarangayEditModal(row)}
+                          className="p-1.5 rounded-md cursor-pointer"
+                          style={{
+                            color: 'var(--primary)',
+                            background: 'var(--tg-subtle)',
+                            border: '1px solid var(--tg-border)',
+                          }}
+                          title="Edit barangay fare"
+                          aria-label="Edit barangay fare"
+                        >
+                          <Pencil size={13} />
+                        </button>
+                        <button
+                          onClick={() => void removeBarangayFare(row)}
+                          disabled={barangayDeletingId === row.id}
+                          className="p-1.5 rounded-md cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                          style={{
+                            color: '#ef4444',
+                            background: 'var(--tg-subtle)',
+                            border: '1px solid var(--tg-border)',
+                          }}
+                          title="Delete barangay fare"
+                          aria-label="Delete barangay fare"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -602,6 +915,324 @@ export default function RoutesFaresTab() {
           </tbody>
         </table>
       </div>
+
+      {routeEditingRow && isClient
+        ? createPortal(
+            <div className="fixed inset-0 z-[2000] bg-black/50 flex items-center justify-center p-4">
+          <div className="card-glow w-full max-w-xl rounded-2xl p-5 md:p-6">
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div>
+                <h3 className="text-theme text-lg font-bold">Edit City Route Fare</h3>
+                <p className="text-xs text-muted-theme mt-1">
+                  {routeEditingRow.origin} to {routeEditingRow.destination} -{' '}
+                  {routeEditingRow.vehicle?.name || routeEditingRow.vehicle_type}
+                </p>
+              </div>
+              <button
+                onClick={closeRouteEditModal}
+                className="p-1.5 rounded-md cursor-pointer"
+                style={{
+                  color: 'var(--tg-muted)',
+                  background: 'var(--tg-subtle)',
+                  border: '1px solid var(--tg-border)',
+                }}
+                title="Close"
+                aria-label="Close edit modal"
+              >
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label className="block">
+                <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+                  Distance (km)
+                </span>
+                <input
+                  className="input-dark"
+                  type="number"
+                  min="0.1"
+                  step="0.1"
+                  value={routeEditForm.distance_km}
+                  onChange={(e) =>
+                    setRouteEditForm((prev) => {
+                      const distance = Number(e.target.value || 0);
+                      const vehicleName =
+                        routeEditingRow.vehicle?.name || routeEditingRow.vehicle_type;
+                      const computedMinutes =
+                        distance > 0 ? computeTravelMinutes(distance, vehicleName) : 0;
+                      return {
+                        ...prev,
+                        distance_km: e.target.value,
+                        travel_time_minutes:
+                          computedMinutes > 0
+                            ? String(computedMinutes)
+                            : prev.travel_time_minutes,
+                      };
+                    })
+                  }
+                />
+              </label>
+              <label className="block">
+                <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+                  Travel Time (minutes)
+                </span>
+                <input
+                  className="input-dark"
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={routeEditForm.travel_time_minutes}
+                  onChange={(e) =>
+                    setRouteEditForm((prev) => ({
+                      ...prev,
+                      travel_time_minutes: e.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label className="block">
+                <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+                  Regular Fare
+                </span>
+                <input
+                  className="input-dark"
+                  type="number"
+                  min="1"
+                  step="0.01"
+                  value={routeEditForm.regular_fare}
+                  onChange={(e) =>
+                    setRouteEditForm((prev) => ({
+                      ...prev,
+                      regular_fare: e.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <label className="block">
+                <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+                  Discount Rate
+                </span>
+                <input
+                  className="input-dark"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={routeEditForm.discount_rate}
+                  onChange={(e) =>
+                    setRouteEditForm((prev) => ({
+                      ...prev,
+                      discount_rate: e.target.value,
+                    }))
+                  }
+                />
+              </label>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 mt-5">
+              <button
+                onClick={closeRouteEditModal}
+                disabled={routeUpdating}
+                className="px-3 py-2 rounded-lg text-sm font-medium cursor-pointer"
+                style={{
+                  color: 'var(--tg-muted)',
+                  background: 'var(--tg-subtle)',
+                  border: '1px solid var(--tg-border)',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void saveRouteEdit()}
+                disabled={routeUpdating}
+                className="btn-primary text-sm"
+                style={routeUpdating ? { opacity: 0.7, cursor: 'not-allowed' } : {}}
+              >
+                {routeUpdating ? 'Saving...' : 'Save Changes'}
+              </button>
+            </div>
+          </div>
+            </div>,
+            document.body
+          )
+        : null}
+
+      {barangayEditingRow && isClient
+        ? createPortal(
+            <div className="fixed inset-0 z-[2000] bg-black/50 flex items-center justify-center p-4">
+              <div className="card-glow w-full max-w-xl rounded-2xl p-5 md:p-6">
+                <div className="flex items-start justify-between gap-3 mb-4">
+                  <div>
+                    <h3 className="text-theme text-lg font-bold">Edit Barangay Fare</h3>
+                    <p className="text-xs text-muted-theme mt-1">
+                      Update the barangay fare rule details below.
+                    </p>
+                  </div>
+                  <button
+                    onClick={closeBarangayEditModal}
+                    className="p-1.5 rounded-md cursor-pointer"
+                    style={{
+                      color: 'var(--tg-muted)',
+                      background: 'var(--tg-subtle)',
+                      border: '1px solid var(--tg-border)',
+                    }}
+                    title="Close"
+                    aria-label="Close edit modal"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <label className="block md:col-span-2">
+                    <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+                      Barangay Name
+                    </span>
+                    <input
+                      className="input-dark"
+                      type="text"
+                      value={barangayEditForm.barangay_name}
+                      onChange={(e) =>
+                        setBarangayEditForm((prev) => ({
+                          ...prev,
+                          barangay_name: e.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+
+                  <label className="block">
+                    <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+                      Distance (km)
+                    </span>
+                    <input
+                      className="input-dark"
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={barangayEditForm.distance_km}
+                      onChange={(e) =>
+                        setBarangayEditForm((prev) => ({
+                          ...prev,
+                          distance_km: e.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+
+                  <label className="block">
+                    <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+                      Tricycle Base Fare
+                    </span>
+                    <input
+                      className="input-dark"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={barangayEditForm.tricycle_base_fare}
+                      onChange={(e) =>
+                        setBarangayEditForm((prev) => ({
+                          ...prev,
+                          tricycle_base_fare: e.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+
+                  <label className="block md:col-span-2">
+                    <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+                      Per-km Increase
+                    </span>
+                    <input
+                      className="input-dark"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={barangayEditForm.per_km_increase}
+                      onChange={(e) =>
+                        setBarangayEditForm((prev) => ({
+                          ...prev,
+                          per_km_increase: e.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-4 space-y-3">
+                  <label className="inline-flex items-center gap-2 text-sm text-theme">
+                    <input
+                      type="checkbox"
+                      checked={barangayEditForm.is_highway}
+                      onChange={(e) =>
+                        setBarangayEditForm((prev) => ({
+                          ...prev,
+                          is_highway: e.target.checked,
+                          allowed_vehicle_types: e.target.checked
+                            ? prev.allowed_vehicle_types
+                            : [],
+                        }))
+                      }
+                    />
+                    Highway barangay
+                  </label>
+                  <div className="flex flex-wrap items-center gap-3">
+                    {HIGHWAY_OPTIONS.map((option) => (
+                      <label
+                        key={option}
+                        className="inline-flex items-center gap-2 text-xs text-theme"
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={!barangayEditForm.is_highway}
+                          checked={barangayEditForm.allowed_vehicle_types.includes(option)}
+                          onChange={(e) =>
+                            setBarangayEditForm((prev) => ({
+                              ...prev,
+                              allowed_vehicle_types: e.target.checked
+                                ? [...prev.allowed_vehicle_types, option]
+                                : prev.allowed_vehicle_types.filter(
+                                    (item) => item !== option
+                                  ),
+                            }))
+                          }
+                        />
+                        {option}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 mt-5">
+                  <button
+                    onClick={closeBarangayEditModal}
+                    disabled={barangayUpdating}
+                    className="px-3 py-2 rounded-lg text-sm font-medium cursor-pointer"
+                    style={{
+                      color: 'var(--tg-muted)',
+                      background: 'var(--tg-subtle)',
+                      border: '1px solid var(--tg-border)',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => void saveBarangayEdit()}
+                    disabled={barangayUpdating}
+                    className="btn-primary text-sm"
+                    style={
+                      barangayUpdating ? { opacity: 0.7, cursor: 'not-allowed' } : {}
+                    }
+                  >
+                    {barangayUpdating ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )
+        : null}
     </div>
   );
 }

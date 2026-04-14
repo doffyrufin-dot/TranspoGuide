@@ -15,12 +15,15 @@ export interface OperatorPaymentRecord {
 export interface OperatorReservationRecord {
   id: string;
   full_name: string;
+  passenger_email?: string | null;
   contact_number: string;
   pickup_location: string;
   route: string;
+  seat_labels?: string[] | null;
   seat_count: number;
   amount_due: number;
   status: string;
+  payment_id?: string | null;
   created_at: string;
   paid_at: string | null;
   latest_message?: string | null;
@@ -60,6 +63,15 @@ export interface OperatorBoardingQueueInfo {
 export interface OperatorPassengersResult {
   queue: OperatorBoardingQueueInfo | null;
   passengers: OperatorBoardingPassenger[];
+  pagination?: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+  };
+  activeTripKey?: string | null;
 }
 
 export interface OperatorUnreadChatThread {
@@ -88,6 +100,14 @@ export interface OperatorPaymentHistoryResult {
     month: number;
   };
   payments: OperatorPaymentRecord[];
+  pagination?: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+  };
 }
 
 export interface OperatorReservationListResult {
@@ -96,10 +116,19 @@ export interface OperatorReservationListResult {
 }
 
 export async function fetchOperatorPaymentHistory(
-  accessToken: string
+  accessToken: string,
+  options?: { page?: number; pageSize?: number }
 ): Promise<OperatorPaymentHistoryResult> {
+  const params = new URLSearchParams();
+  if (options?.page && Number.isFinite(options.page)) {
+    params.set('page', String(Math.max(1, Math.floor(options.page))));
+  }
+  if (options?.pageSize && Number.isFinite(options.pageSize)) {
+    params.set('pageSize', String(Math.max(1, Math.floor(options.pageSize))));
+  }
+
   const { data } = await http.get<OperatorPaymentHistoryResult>(
-    '/api/operator/payments',
+    `/api/operator/payments${params.toString() ? `?${params.toString()}` : ''}`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -185,11 +214,38 @@ export async function sendOperatorReservationMessage(input: {
   return data.message;
 }
 
+export async function markOperatorReservationChatSeen(input: {
+  accessToken: string;
+  reservationId: string;
+}) {
+  const { data } = await http.patch(
+    '/api/operator/reservations/chat',
+    {
+      reservationId: input.reservationId,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+      },
+    }
+  );
+  return data;
+}
+
 export async function fetchOperatorBoardingPassengers(
-  accessToken: string
+  accessToken: string,
+  options?: { page?: number; pageSize?: number }
 ): Promise<OperatorPassengersResult> {
+  const params = new URLSearchParams();
+  if (options?.page && Number.isFinite(options.page)) {
+    params.set('page', String(Math.max(1, Math.floor(options.page))));
+  }
+  if (options?.pageSize && Number.isFinite(options.pageSize)) {
+    params.set('pageSize', String(Math.max(1, Math.floor(options.pageSize))));
+  }
+
   const { data } = await http.get<OperatorPassengersResult>(
-    '/api/operator/passengers',
+    `/api/operator/passengers${params.toString() ? `?${params.toString()}` : ''}`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,

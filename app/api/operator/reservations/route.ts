@@ -16,7 +16,6 @@ const isFinalStatus = (status?: string | null) => {
 const isPendingStatus = (status?: string | null) => {
   const s = (status || '').toLowerCase();
   return (
-    s === 'pending_payment' ||
     s === 'pending_operator_approval' ||
     s === 'paid'
   );

@@ -32,7 +32,9 @@ type RegisterApplicationFormProps = {
   isFormValid: boolean;
   onSignOut: () => void;
   onSubmit: (e: React.FormEvent) => void;
-  onFieldChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onFieldChange: (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
+  ) => void;
   onFileChange: (e: React.ChangeEvent<HTMLInputElement>, key: string) => void;
 };
 
@@ -173,7 +175,7 @@ export default function RegisterApplicationForm({
                 <FaShuttleVan style={{ color: 'var(--primary)' }} /> Vehicle
                 Information
               </h2>
-              <p className="text-muted-theme text-sm mb-6">Details about your van</p>
+              <p className="text-muted-theme text-sm mb-6">Details about your vehicle</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                 <div>
                   <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-2">
@@ -191,16 +193,17 @@ export default function RegisterApplicationForm({
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-2">
-                    Vehicle Model
+                    Vehicle Type
                   </label>
                   <input
                     type="text"
                     name="vehicle_model"
                     value={form.vehicle_model}
                     onChange={onFieldChange}
-                    placeholder="e.g. Toyota HiAce"
+                    readOnly
                     className="input-dark"
                     required
+                    style={{ opacity: 0.8, cursor: 'not-allowed' }}
                   />
                 </div>
                 <div>
