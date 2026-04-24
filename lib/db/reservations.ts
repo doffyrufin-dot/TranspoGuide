@@ -167,7 +167,7 @@ export async function createReservationIntent(input: CreateReservationIntentInpu
       seat_labels: seatLabels,
       seat_count: seatLabels.length,
       amount_due: input.amount,
-      status: 'pending_payment',
+      status: 'pending_operator_approval',
       trip_key: input.tripKey,
       lock_expires_at: lockExpiresAtIso(),
       queue_id: input.queueId || null,
@@ -352,7 +352,7 @@ export async function markReservationPaid(reservationId: string, paymentId?: str
 
   const { data: reservationRows, error: reservationReadError } = await supabase
     .from('tbl_reservations')
-    .select('id, full_name, payment_id')
+    .select('id, full_name, payment_id, status')
     .eq('id', reservationId)
     .limit(1);
 
@@ -363,6 +363,17 @@ export async function markReservationPaid(reservationId: string, paymentId?: str
   const reservation = reservationRows?.[0];
   if (!reservation) {
     throw new Error('Reservation not found.');
+  }
+  const currentStatus = String((reservation as { status?: string | null }).status || '').toLowerCase();
+  if (currentStatus === 'pending_operator_approval') {
+    throw new Error('Reservation is still waiting for operator approval.');
+  }
+  if (
+    currentStatus !== 'pending_payment' &&
+    currentStatus !== 'confirmed' &&
+    currentStatus !== 'paid'
+  ) {
+    throw new Error('Reservation status does not allow payment confirmation.');
   }
 
   const canonicalReservationId =
@@ -381,7 +392,7 @@ export async function markReservationPaid(reservationId: string, paymentId?: str
   const { error: reservationError } = await supabase
     .from('tbl_reservations')
     .update({
-      status: 'pending_operator_approval',
+      status: 'confirmed',
       payment_id: resolvedPaymentReference,
       paid_at: nowIso,
       updated_at: nowIso,
@@ -636,15 +647,16 @@ export async function updateReservationStatusByOperator(input: {
   status: 'confirmed' | 'rejected' | 'picked_up';
 }) {
   const supabase = getServiceClient();
+  const nextStatus = input.status === 'confirmed' ? 'pending_payment' : input.status;
   const allowedCurrentStatuses =
     input.status === 'picked_up'
       ? ['confirmed', 'pending_operator_approval', 'paid']
-      : ['pending_operator_approval', 'paid'];
+      : ['pending_operator_approval'];
 
   const { data: rows, error } = await supabase
     .from('tbl_reservations')
     .update({
-      status: input.status,
+      status: nextStatus,
       updated_at: new Date().toISOString(),
     })
     .eq('id', input.reservationId)
@@ -701,7 +713,7 @@ export async function releaseReservationLocks(reservationId: string) {
     .from('tbl_seat_locks')
     .delete()
     .eq('reservation_id', reservationId)
-    .eq('status', 'locked');
+    .in('status', ['locked', 'reserved']);
 
   await supabase
     .from('tbl_reservations')

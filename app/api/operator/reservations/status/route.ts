@@ -55,13 +55,13 @@ async function sendReservationStatusEmail(params: {
   const plateText = (params.plateNumber || '').trim() || 'N/A';
 
   const subject = isConfirmed
-    ? `${appName}: Reservation Confirmed`
+    ? `${appName}: Reservation Approved - Downpayment Required`
     : `${appName}: Reservation Rejected`;
   const headline = isConfirmed
-    ? 'Your reservation is confirmed'
+    ? 'Your reservation is approved'
     : 'Your reservation was rejected';
   const body = isConfirmed
-    ? 'Your booking has been approved by the operator.'
+    ? 'Your booking has been approved by the operator. Please pay the downpayment to finalize your seat.'
     : 'The operator rejected your booking. You may submit a new reservation.';
 
   const html = `
@@ -88,7 +88,7 @@ async function sendReservationStatusEmail(params: {
                     <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Plate Number:</strong> ${plateText}</td></tr>
                     <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Selected Seat Number(s):</strong> ${seatText}</td></tr>
                     <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Seat Count:</strong> ${seatCountText}</td></tr>
-                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Status:</strong> ${params.status.toUpperCase()}</td></tr>
+                    <tr><td style="padding:6px 0;font-size:14px;color:#334155;"><strong>Status:</strong> ${isConfirmed ? 'PENDING PAYMENT' : 'REJECTED'}</td></tr>
                   </table>
 
                   <p style="margin:16px 0 0;font-size:13px;color:#475569;">
@@ -207,6 +207,37 @@ export async function POST(req: NextRequest) {
     const status = (body.status || '').trim().toLowerCase();
     if (!reservationId || (status !== 'confirmed' && status !== 'rejected' && status !== 'picked_up')) {
       return NextResponse.json({ error: 'invalid_payload' }, { status: 400 });
+    }
+
+    if (status === 'confirmed') {
+      const { data: accountRows, error: accountError } = await serviceClient
+        .from('tbl_operator_payment_accounts')
+        .select('id, paymongo_secret_key, is_active')
+        .eq('operator_user_id', user.id)
+        .eq('is_active', true)
+        .limit(1);
+
+      if (accountError) {
+        return NextResponse.json(
+          { error: accountError.message || 'Failed to validate payout setup.' },
+          { status: 500 }
+        );
+      }
+
+      const hasSecretKey = !!String(
+        (accountRows?.[0] as { paymongo_secret_key?: string | null } | undefined)
+          ?.paymongo_secret_key || ''
+      ).trim();
+
+      if (!hasSecretKey) {
+        return NextResponse.json(
+          {
+            error:
+              'Payout setup required before approval. Please add your PayMongo Secret Key in Settings.',
+          },
+          { status: 409 }
+        );
+      }
     }
 
     const updated = await updateReservationStatusByOperator({

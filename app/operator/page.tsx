@@ -8,6 +8,7 @@ import type { AuthChangeEvent, RealtimeChannel, Session } from '@supabase/supaba
 import { supabase } from '@/utils/supabase/client';
 import { useTheme } from '@/components/ThemeProvider';
 import sileoToast from '@/lib/utils/sileo-toast';
+import playNotificationSound from '@/lib/utils/notification-sound';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -17,6 +18,8 @@ import {
   fetchOperatorUnreadChatCount,
   markOperatorReservationChatSeen,
   fetchOperatorPaymentHistory,
+  fetchOperatorPaymentAccountStatus,
+  fetchOperatorRatingSummary,
   fetchOperatorReservationMessages,
   fetchOperatorReservations,
   type OperatorBoardingPassenger,
@@ -25,7 +28,10 @@ import {
   updateOperatorReservationStatus,
   type OperatorReservationMessage,
   type OperatorPaymentRecord,
+  type OperatorPaymentAccountStatusResult,
+  type OperatorRatingSummaryResult,
   type OperatorReservationRecord,
+  saveOperatorPaymentAccount,
 } from '@/lib/services/operator.services';
 import {
   fetchActiveQueue,
@@ -55,6 +61,7 @@ import {
   SendHorizontal,
   Smile,
   Eye,
+  Star,
 } from 'lucide-react';
 
 const LeafletMapContainer = dynamic<any>(
@@ -91,6 +98,7 @@ type DashboardNotification = {
   title: string;
   description: string;
   created_at: string;
+  target_tab?: 'Reservations' | 'Settings';
 };
 
 type OperatorSeatMapItem = {
@@ -115,6 +123,13 @@ export default function OperatorDashboard() {
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifUnreadCount, setNotifUnreadCount] = useState(0);
   const [notifications, setNotifications] = useState<DashboardNotification[]>([]);
+  const [paymentSetupStatus, setPaymentSetupStatus] =
+    useState<OperatorPaymentAccountStatusResult | null>(null);
+  const [paymentSetupLoading, setPaymentSetupLoading] = useState(false);
+  const [paymentSetupPromptDismissed, setPaymentSetupPromptDismissed] =
+    useState(false);
+  const notifSoundReadyRef = React.useRef(false);
+  const notifTopIdRef = React.useRef('');
 
   useEffect(() => {
     let cancelled = false;
@@ -239,7 +254,20 @@ export default function OperatorDashboard() {
       if (!res.ok) {
         throw new Error(data.error || 'Failed to load notifications.');
       }
-      setNotifications((data.notifications || []) as DashboardNotification[]);
+      const nextNotifications = (data.notifications || []) as DashboardNotification[];
+      const nextTopId = String(nextNotifications[0]?.id || '').trim();
+      if (
+        notifSoundReadyRef.current &&
+        nextTopId &&
+        nextTopId !== notifTopIdRef.current
+      ) {
+        playNotificationSound();
+      }
+      if (!notifSoundReadyRef.current) {
+        notifSoundReadyRef.current = true;
+      }
+      notifTopIdRef.current = nextTopId;
+      setNotifications(nextNotifications);
       if (!notifOpen) {
         setNotifUnreadCount(Number(data.unreadCount || 0));
       }
@@ -247,6 +275,22 @@ export default function OperatorDashboard() {
       // silent fail for bell data
     }
   }, [sessionToken, notifOpen]);
+
+  const loadPaymentSetupStatus = useCallback(async () => {
+    if (!sessionToken) return;
+    try {
+      setPaymentSetupLoading(true);
+      const snapshot = await fetchOperatorPaymentAccountStatus(sessionToken);
+      setPaymentSetupStatus(snapshot);
+      if (!snapshot.setupRequired) {
+        setPaymentSetupPromptDismissed(false);
+      }
+    } catch {
+      // no-op: keep dashboard usable even if payment setup status fetch fails
+    } finally {
+      setPaymentSetupLoading(false);
+    }
+  }, [sessionToken]);
 
   useEffect(() => {
     if (!sessionToken) return;
@@ -259,6 +303,11 @@ export default function OperatorDashboard() {
 
   useEffect(() => {
     if (!sessionToken || !operatorUserId) return;
+    void loadPaymentSetupStatus();
+  }, [sessionToken, operatorUserId, loadPaymentSetupStatus]);
+
+  useEffect(() => {
+    if (!sessionToken || !operatorUserId) return;
 
     let refreshTimeout: number | null = null;
     const scheduleRefresh = () => {
@@ -266,6 +315,7 @@ export default function OperatorDashboard() {
       refreshTimeout = window.setTimeout(() => {
         refreshTimeout = null;
         void loadNotifications(true);
+        void loadPaymentSetupStatus();
       }, 250);
     };
 
@@ -281,6 +331,26 @@ export default function OperatorDashboard() {
         },
         scheduleRefresh
       )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_operator_applications',
+          filter: `user_id=eq.${operatorUserId}`,
+        },
+        scheduleRefresh
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_operator_payment_accounts',
+          filter: `operator_user_id=eq.${operatorUserId}`,
+        },
+        scheduleRefresh
+      )
       .subscribe();
 
     return () => {
@@ -289,7 +359,7 @@ export default function OperatorDashboard() {
       }
       void supabase.removeChannel(notificationsChannel);
     };
-  }, [sessionToken, operatorUserId, loadNotifications]);
+  }, [sessionToken, operatorUserId, loadNotifications, loadPaymentSetupStatus]);
 
   const formatNotifTime = (value: string) => {
     const date = new Date(value);
@@ -323,6 +393,21 @@ export default function OperatorDashboard() {
           />
         );
       case 'Income': return <IncomeHistoryContent accessToken={sessionToken} />;
+      case 'Settings':
+        return (
+          <OperatorSettingsContent
+            accessToken={sessionToken}
+            statusSnapshot={paymentSetupStatus}
+            statusLoading={paymentSetupLoading}
+            onStatusChanged={(nextStatus) => {
+              setPaymentSetupStatus(nextStatus);
+              if (!nextStatus.setupRequired) {
+                setPaymentSetupPromptDismissed(false);
+              }
+              void loadPaymentSetupStatus();
+            }}
+          />
+        );
       default: return (
         <div className="admin-tab p-10 text-center opacity-60">
           <h2 className="text-xl font-bold text-theme">Coming Soon</h2>
@@ -530,7 +615,11 @@ export default function OperatorDashboard() {
                             key={item.id}
                             type="button"
                             onClick={() => {
-                              setActiveView('Reservations');
+                              setActiveView(
+                                item.target_tab === 'Settings'
+                                  ? 'Settings'
+                                  : 'Reservations'
+                              );
                               setNotifOpen(false);
                               setNotifUnreadCount(0);
                             }}
@@ -567,7 +656,53 @@ export default function OperatorDashboard() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-6">{renderContent()}</div>
+        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4">
+          {paymentSetupStatus?.setupRequired && !paymentSetupPromptDismissed && (
+            <div
+              className="rounded-2xl p-4 md:p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-3"
+              style={{
+                background: 'rgba(245,158,11,0.12)',
+                border: '1px solid rgba(245,158,11,0.35)',
+              }}
+            >
+              <div>
+                <p className="text-sm font-semibold" style={{ color: '#f59e0b' }}>
+                  Complete payout setup required
+                </p>
+                <p className="text-xs text-theme mt-1">
+                  Add your PayMongo Secret Key in Settings so online downpayments
+                  will go to your operator account.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveView('Settings')}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                  style={{
+                    background: 'var(--primary)',
+                    color: '#fff',
+                  }}
+                >
+                  Setup Now
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaymentSetupPromptDismissed(true)}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    color: 'var(--tg-muted)',
+                    border: '1px solid var(--tg-border-primary)',
+                  }}
+                >
+                  Later
+                </button>
+              </div>
+            </div>
+          )}
+          {renderContent()}
+        </div>
         <OperatorChatWidget accessToken={sessionToken} />
       </main>
     </div>
@@ -633,6 +768,8 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   const chatBodyRef = React.useRef<HTMLDivElement | null>(null);
   const chatRealtimeRef = React.useRef<RealtimeChannel | null>(null);
   const unreadRealtimeRef = React.useRef<RealtimeChannel | null>(null);
+  const unreadSoundReadyRef = React.useRef(false);
+  const prevUnreadThreadCountRef = React.useRef(0);
   const chatOpenRef = React.useRef(false);
   const activeReservationRef = React.useRef('');
   const quickEmojis = ['😀', '😁', '😂', '😊', '😍', '👍', '🙏', '❤️'];
@@ -867,6 +1004,20 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    const prevCount = prevUnreadThreadCountRef.current;
+    if (
+      unreadSoundReadyRef.current &&
+      unreadThreadCount > prevCount
+    ) {
+      playNotificationSound();
+    }
+    prevUnreadThreadCountRef.current = unreadThreadCount;
+    if (!unreadSoundReadyRef.current) {
+      unreadSoundReadyRef.current = true;
+    }
+  }, [unreadThreadCount]);
 
   useEffect(() => {
     if (!accessToken) return;
@@ -1487,13 +1638,26 @@ function ReservationsContent({
     return normalized.charAt(0).toUpperCase() + normalized.slice(1);
   };
 
+  const getReservationStatusBadgeStyle = (status?: string | null) => {
+    const normalized = String(status || '').toLowerCase();
+    if (normalized === 'confirmed') {
+      return { background: 'rgba(34,197,94,0.12)', color: '#22c55e' };
+    }
+    if (normalized === 'pending_payment') {
+      return { background: 'rgba(245,158,11,0.12)', color: '#f59e0b' };
+    }
+    if (normalized === 'picked_up' || normalized === 'departed') {
+      return { background: 'rgba(37,151,233,0.12)', color: 'var(--primary)' };
+    }
+    if (normalized === 'rejected' || normalized === 'cancelled') {
+      return { background: 'rgba(239,68,68,0.12)', color: '#ef4444' };
+    }
+    return { background: 'var(--tg-subtle)', color: 'var(--tg-muted)' };
+  };
+
   const isReviewableStatus = (status?: string | null) => {
     const normalized = String(status || '').toLowerCase();
-    return (
-      normalized === 'pending_payment' ||
-      normalized === 'pending_operator_approval' ||
-      normalized === 'paid'
-    );
+    return normalized === 'pending_operator_approval';
   };
 
   const openDetailsModal = (reservation: OperatorReservationRecord) => {
@@ -1577,7 +1741,10 @@ function ReservationsContent({
         status,
       });
       sileoToast.success({
-        title: status === 'confirmed' ? 'Reservation confirmed' : 'Reservation rejected',
+        title:
+          status === 'confirmed'
+            ? 'Reservation approved. Waiting for downpayment.'
+            : 'Reservation rejected',
       });
       await loadReservations();
       return true;
@@ -1664,7 +1831,7 @@ function ReservationsContent({
                 <th className="text-left p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">Passenger</th>
                 <th className="text-left p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">Route</th>
                 <th className="text-left p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">
-                  {activeTab === 'pending' ? 'Payment Time' : 'Updated'}
+                  {activeTab === 'pending' ? 'Requested' : 'Updated'}
                 </th>
                 <th className="text-center p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">Seats / Amount</th>
                 <th className="text-right p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">Action</th>
@@ -1774,11 +1941,11 @@ function ReservationsContent({
                             View
                           </span>
                         </button>
-                        <span className="px-2.5 py-1 rounded-full text-xs font-bold"
-                          style={(res.status || '').toLowerCase() === 'confirmed'
-                            ? { background: 'rgba(34,197,94,0.12)', color: '#22c55e' }
-                            : { background: 'rgba(239,68,68,0.12)', color: '#ef4444' }}>
-                          {String(res.status || '').toLowerCase() === 'confirmed' ? 'Confirmed' : 'Rejected'}
+                        <span
+                          className="px-2.5 py-1 rounded-full text-xs font-bold"
+                          style={getReservationStatusBadgeStyle(res.status)}
+                        >
+                          {formatReservationStatus(res.status)}
                         </span>
                       </div>
                     </td>
@@ -2638,6 +2805,29 @@ function MyVehicleContent({
   const [selectedSeatLabel, setSelectedSeatLabel] = useState('');
   const [walkInName, setWalkInName] = useState('');
 
+  const matchesCurrentOperator = useCallback(
+    (row: QueueEntry) =>
+      (operatorUserId && row.operatorUserId === operatorUserId) ||
+      (!!operatorEmail &&
+        row.operatorEmail?.toLowerCase() === operatorEmail.toLowerCase()),
+    [operatorEmail, operatorUserId]
+  );
+
+  const pickMyQueueEntry = useCallback(
+    (rows: QueueEntry[]) => {
+      const mine = rows.filter((row) => matchesCurrentOperator(row));
+      if (mine.length === 0) return null;
+      return [...mine].sort((a, b) => {
+        const aRank = a.status === 'boarding' ? 0 : 1;
+        const bRank = b.status === 'boarding' ? 0 : 1;
+        if (aRank !== bRank) return aRank - bRank;
+        if (a.position !== b.position) return a.position - b.position;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      })[0];
+    },
+    [matchesCurrentOperator]
+  );
+
   const loadQueue = async (isManual = false) => {
     try {
       if (isManual) {
@@ -2647,12 +2837,7 @@ function MyVehicleContent({
       }
       const rows = await fetchActiveQueue();
       setQueueRows(rows || []);
-      const mine = (rows || []).find(
-        (r) =>
-          (operatorUserId && r.operatorUserId === operatorUserId) ||
-          (!!operatorEmail &&
-            r.operatorEmail?.toLowerCase() === operatorEmail.toLowerCase())
-      );
+      const mine = pickMyQueueEntry(rows || []);
       if (mine) {
         setRoute(mine.route || '');
         setDriverName(mine.driver || '');
@@ -2680,14 +2865,9 @@ function MyVehicleContent({
       void loadQueue();
     }, 300000);
     return () => window.clearInterval(timer);
-  }, [operatorEmail, operatorName, operatorUserId]);
+  }, [operatorEmail, operatorName, operatorUserId, pickMyQueueEntry]);
 
-  const myQueue = queueRows.find(
-    (r) =>
-      (operatorUserId && r.operatorUserId === operatorUserId) ||
-      (!!operatorEmail &&
-        r.operatorEmail?.toLowerCase() === operatorEmail.toLowerCase())
-  );
+  const myQueue = pickMyQueueEntry(queueRows);
   const inQueue = !!myQueue;
   const tripDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const tripKey =
@@ -2886,6 +3066,8 @@ function MyVehicleContent({
         },
         body: JSON.stringify({
           action,
+          queueId:
+            action === 'leave' || action === 'boarding' ? myQueue?.id : undefined,
           route: route.trim(),
           driverName: driverName.trim(),
           departureTime: departureTime.trim(),
@@ -3070,25 +3252,6 @@ function MyVehicleContent({
             </button>
           ) : (
             <>
-              {myQueue?.status !== 'boarding' && (
-                <button
-                  onClick={() =>
-                    runQueueAction('boarding', 'Status updated to boarding')
-                  }
-                  disabled={
-                    actionLoading || queueLoading || (myQueue?.position || 0) !== 1
-                  }
-                  className="px-4 py-2 rounded-xl text-sm font-semibold cursor-pointer"
-                  style={{
-                    background: 'rgba(245,158,11,0.12)',
-                    color: '#f59e0b',
-                    border: '1px solid rgba(245,158,11,0.35)',
-                    opacity: (myQueue?.position || 0) === 1 ? 1 : 0.55,
-                  }}
-                >
-                  Set Boarding
-                </button>
-              )}
               <button
                 onClick={() =>
                   runQueueAction(
@@ -3111,9 +3274,9 @@ function MyVehicleContent({
             </>
           )}
         </div>
-        {inQueue && myQueue?.status !== 'boarding' && (myQueue?.position || 0) !== 1 && (
+        {inQueue && (
           <p className="text-xs mt-3" style={{ color: 'var(--tg-muted)' }}>
-            Waiting turn: only queue position #1 can set boarding.
+            Auto-boarding is enabled: queue position #1 is automatically set to boarding.
           </p>
         )}
       </div>
@@ -3319,6 +3482,12 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [summary, setSummary] = useState({ today: 0, week: 0, month: 0 });
+  const [ratingSummary, setRatingSummary] = useState<OperatorRatingSummaryResult>({
+    average_rating: 0,
+    review_count: 0,
+    trusted: false,
+    recent_feedback: [],
+  });
   const [payments, setPayments] = useState<OperatorPaymentRecord[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -3333,14 +3502,18 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
       try {
         setLoading(true);
         setError('');
-        const data = await fetchOperatorPaymentHistory(accessToken, {
-          page: targetPage,
-          pageSize: PAYMENTS_PAGE_SIZE,
-        });
+        const [paymentData, operatorRatingData] = await Promise.all([
+          fetchOperatorPaymentHistory(accessToken, {
+            page: targetPage,
+            pageSize: PAYMENTS_PAGE_SIZE,
+          }),
+          fetchOperatorRatingSummary(accessToken),
+        ]);
         if (cancelled) return;
-        setSummary(data.summary);
-        setPayments(data.payments || []);
-        const pageInfo = data.pagination;
+        setSummary(paymentData.summary);
+        setPayments(paymentData.payments || []);
+        setRatingSummary(operatorRatingData);
+        const pageInfo = paymentData.pagination;
         const nextTotal = Number(pageInfo?.total || 0);
         const nextTotalPages = Math.max(1, Number(pageInfo?.totalPages || 1));
         const nextPage = Math.min(
@@ -3374,7 +3547,7 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
 
   return (
     <div className="admin-tab space-y-6">
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           { label: 'Today', value: formatPeso(summary.today), color: 'var(--primary)' },
           { label: 'This Week', value: formatPeso(summary.week), color: '#22c55e' },
@@ -3388,6 +3561,93 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
             </div>
           </div>
         ))}
+        <div className="card-glow p-5 rounded-2xl">
+          <p className="text-xs text-muted-theme font-semibold uppercase tracking-wider mb-1">
+            Operator Rating
+          </p>
+          <div className="flex items-center gap-2">
+            <Star size={18} style={{ color: '#f59e0b', fill: '#f59e0b' }} />
+            <p className="text-2xl font-extrabold text-theme">
+              {Number(ratingSummary.average_rating || 0).toFixed(1)}
+            </p>
+            <span className="text-sm text-muted-theme">/ 5</span>
+          </div>
+          <p className="text-xs text-muted-theme mt-1">
+            {ratingSummary.review_count} review
+            {ratingSummary.review_count === 1 ? '' : 's'}
+          </p>
+          <div className="mt-3">
+            <span
+              className="px-2.5 py-1 rounded-full text-[11px] font-semibold"
+              style={
+                ratingSummary.trusted
+                  ? {
+                      background: 'rgba(34,197,94,0.12)',
+                      color: '#22c55e',
+                    }
+                  : {
+                      background: 'rgba(59,130,246,0.12)',
+                      color: 'var(--primary)',
+                    }
+              }
+            >
+              {ratingSummary.trusted ? 'Trusted Operator' : 'Building Trust'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="card-glow p-6 rounded-2xl">
+        <h3 className="text-theme font-bold text-lg mb-4">Recent Passenger Feedback</h3>
+        {loading ? (
+          <p className="text-sm text-muted-theme">Loading feedback...</p>
+        ) : ratingSummary.recent_feedback.length === 0 ? (
+          <p className="text-sm text-muted-theme">
+            No feedback yet. Ratings from commuters will appear here.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {ratingSummary.recent_feedback.slice(0, 5).map((row) => (
+              <div
+                key={row.id}
+                className="rounded-xl p-3"
+                style={{
+                  background: 'var(--tg-bg-alt)',
+                  border: '1px solid var(--tg-border)',
+                }}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-theme">
+                    {row.commuter_name || 'Commuter'}
+                  </p>
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: 5 }, (_, idx) => {
+                      const active = idx < Number(row.rating || 0);
+                      return (
+                        <Star
+                          key={`${row.id}-star-${idx + 1}`}
+                          size={13}
+                          style={{
+                            color: active ? '#f59e0b' : '#9ca3af',
+                            fill: active ? '#f59e0b' : 'transparent',
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+                {row.feedback && (
+                  <p className="text-xs text-muted-theme mt-1.5 leading-relaxed">
+                    {row.feedback}
+                  </p>
+                )}
+                <p className="text-[11px] text-muted-theme mt-2">
+                  {new Date(row.created_at).toLocaleString('en-PH')}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card-glow p-6 rounded-2xl">
@@ -3478,6 +3738,273 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function OperatorSettingsContent({
+  accessToken,
+  statusSnapshot,
+  statusLoading,
+  onStatusChanged,
+}: {
+  accessToken: string;
+  statusSnapshot: OperatorPaymentAccountStatusResult | null;
+  statusLoading?: boolean;
+  onStatusChanged: (nextStatus: OperatorPaymentAccountStatusResult) => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [status, setStatus] = useState<OperatorPaymentAccountStatusResult | null>(
+    statusSnapshot
+  );
+  const [secretKey, setSecretKey] = useState('');
+  const [webhookSecret, setWebhookSecret] = useState('');
+  const [showSecret, setShowSecret] = useState(false);
+  const [showWebhook, setShowWebhook] = useState(false);
+
+  const loadStatus = useCallback(
+    async (silent = false) => {
+      if (!accessToken) return;
+      try {
+        if (!silent) setLoading(true);
+        setError('');
+        const nextStatus = await fetchOperatorPaymentAccountStatus(accessToken);
+        setStatus(nextStatus);
+        onStatusChanged(nextStatus);
+      } catch (err: any) {
+        if (!silent) {
+          setError(err?.message || 'Failed to load payout setup status.');
+        }
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [accessToken, onStatusChanged]
+  );
+
+  useEffect(() => {
+    setStatus(statusSnapshot);
+  }, [statusSnapshot]);
+
+  useEffect(() => {
+    if (statusSnapshot) return;
+    void loadStatus(false);
+  }, [statusSnapshot, loadStatus]);
+
+  const handleSave = async () => {
+    if (!secretKey.trim()) {
+      setError('PayMongo Secret Key is required.');
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setError('');
+      const nextStatus = await saveOperatorPaymentAccount({
+        accessToken,
+        paymongoSecretKey: secretKey.trim(),
+        paymongoWebhookSecret: webhookSecret.trim(),
+      });
+      setStatus(nextStatus);
+      onStatusChanged(nextStatus);
+      setSecretKey('');
+      setWebhookSecret('');
+      sileoToast.success({
+        title: 'Payout setup saved',
+        description:
+          'Your PayMongo account is now configured for operator downpayments.',
+      });
+    } catch (err: any) {
+      const message = err?.message || 'Failed to save payout setup.';
+      setError(message);
+      sileoToast.error({
+        title: 'Save failed',
+        description: message,
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const effectiveLoading = loading || !!statusLoading;
+
+  return (
+    <div className="admin-tab space-y-6">
+      <div className="card-glow p-5 rounded-2xl">
+        <h3 className="text-theme font-bold text-lg">Payout Setup Status</h3>
+        <p className="text-sm text-muted-theme mt-1">
+          Configure your operator PayMongo key so online downpayments go directly
+          to your account.
+        </p>
+
+        {effectiveLoading ? (
+          <p className="text-sm text-muted-theme mt-4">Loading status...</p>
+        ) : (
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div
+              className="rounded-xl p-3"
+              style={{
+                background: 'var(--tg-bg-alt)',
+                border: '1px solid var(--tg-border)',
+              }}
+            >
+              <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+                Application
+              </p>
+              <p className="text-sm font-semibold text-theme uppercase">
+                {status?.applicationStatus || 'unknown'}
+              </p>
+            </div>
+            <div
+              className="rounded-xl p-3"
+              style={{
+                background: 'var(--tg-bg-alt)',
+                border: '1px solid var(--tg-border)',
+              }}
+            >
+              <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+                Secret Key
+              </p>
+              <p className="text-sm font-semibold text-theme">
+                {status?.hasSecretKey
+                  ? `Configured (${status.maskedSecretKey || 'hidden'})`
+                  : 'Not configured'}
+              </p>
+            </div>
+            <div
+              className="rounded-xl p-3"
+              style={{
+                background: 'var(--tg-bg-alt)',
+                border: '1px solid var(--tg-border)',
+              }}
+            >
+              <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+                Webhook Secret
+              </p>
+              <p className="text-sm font-semibold text-theme">
+                {!status?.webhookSecretSupported
+                  ? 'Column not ready'
+                  : status?.hasWebhookSecret
+                    ? 'Configured'
+                    : 'Optional'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {status?.setupRequired && (
+          <div
+            className="mt-4 rounded-xl p-3 text-sm"
+            style={{
+              background: 'rgba(245,158,11,0.12)',
+              border: '1px solid rgba(245,158,11,0.35)',
+              color: '#f59e0b',
+            }}
+          >
+            Setup required: please add your PayMongo Secret Key below before
+            handling online downpayments.
+          </div>
+        )}
+      </div>
+
+      <div className="card-glow p-5 rounded-2xl">
+        <h3 className="text-theme font-bold">PayMongo Account Configuration</h3>
+        <p className="text-xs text-muted-theme mt-1">
+          Secret key format usually starts with <span className="font-semibold">sk_</span>.
+          Webhook secret is optional and usually starts with{' '}
+          <span className="font-semibold">whsk_</span>.
+        </p>
+
+        <div className="mt-4 space-y-3">
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              PayMongo Secret Key
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                type={showSecret ? 'text' : 'password'}
+                value={secretKey}
+                onChange={(e) => setSecretKey(e.target.value)}
+                placeholder="sk_test_xxx or sk_live_xxx"
+                className="input-dark"
+                disabled={saving}
+              />
+              <button
+                type="button"
+                onClick={() => setShowSecret((prev) => !prev)}
+                className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  color: 'var(--primary)',
+                  border: '1px solid var(--tg-border-primary)',
+                }}
+              >
+                {showSecret ? 'Hide' : 'Show'}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              PayMongo Webhook Secret (Optional)
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                type={showWebhook ? 'text' : 'password'}
+                value={webhookSecret}
+                onChange={(e) => setWebhookSecret(e.target.value)}
+                placeholder="whsk_xxx"
+                className="input-dark"
+                disabled={saving}
+              />
+              <button
+                type="button"
+                onClick={() => setShowWebhook((prev) => !prev)}
+                className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  color: 'var(--primary)',
+                  border: '1px solid var(--tg-border-primary)',
+                }}
+              >
+                {showWebhook ? 'Hide' : 'Show'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {error && (
+          <p className="text-sm mt-3" style={{ color: '#ef4444' }}>
+            {error}
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="btn-primary text-sm px-4 py-2 disabled:opacity-60"
+          >
+            {saving ? 'Saving...' : 'Save Payout Setup'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadStatus(false)}
+            disabled={effectiveLoading || saving}
+            className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
+            style={{
+              background: 'var(--tg-subtle)',
+              color: 'var(--primary)',
+              border: '1px solid var(--tg-border-primary)',
+            }}
+          >
+            Refresh Status
+          </button>
+        </div>
       </div>
     </div>
   );

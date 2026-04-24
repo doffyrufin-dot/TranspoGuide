@@ -27,11 +27,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true, updated: true });
     }
 
-    if (status === 'pending_operator_approval' || status === 'paid') {
-      if (paymentReference && !record.reservation.payment_id) {
-        await markReservationPaid(reservationId, paymentReference);
-      }
+    if (
+      status === 'confirmed' ||
+      status === 'departed' ||
+      status === 'picked_up' ||
+      status === 'paid'
+    ) {
       return NextResponse.json({ ok: true, updated: false });
+    }
+
+    if (status === 'pending_operator_approval') {
+      return NextResponse.json(
+        { error: 'Reservation is still waiting for operator approval.' },
+        { status: 409 }
+      );
     }
 
     return NextResponse.json({ ok: true, updated: false });

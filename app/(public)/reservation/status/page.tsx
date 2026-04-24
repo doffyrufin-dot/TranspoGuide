@@ -7,25 +7,38 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '@/utils/supabase/client';
 import { MessageCircle, Smile, X } from 'lucide-react';
 import {
+  createCheckoutSession,
   fetchReservationStatus,
   sendReservationMessage,
+  submitReservationOperatorFeedback,
+  type ReservationOperatorFeedback,
   type ReservationMessage,
   type ReservationStatusResult,
   type ReservationStatusPayload,
 } from '@/lib/services/payment.services';
 import sileoToast from '@/lib/utils/sileo-toast';
+import playNotificationSound from '@/lib/utils/notification-sound';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { FaCheckCircle, FaClock, FaComments, FaPaperPlane } from 'react-icons/fa';
+import {
+  FaCheckCircle,
+  FaClock,
+  FaComments,
+  FaPaperPlane,
+  FaStar,
+} from 'react-icons/fa';
 
 const statusLabel = (status?: string) => {
   switch ((status || '').toLowerCase()) {
-    case 'paid':
     case 'pending_operator_approval':
-      return 'Paid - Waiting for operator confirmation';
+      return 'Pending Operator Approval';
+    case 'pending_payment':
+      return 'Operator Approved - Pay Downpayment';
+    case 'paid':
+      return 'Paid';
     case 'confirmed':
-      return 'Confirmed';
+      return 'Confirmed and Paid';
     case 'departed':
       return 'Van Departed';
     case 'rejected':
@@ -34,8 +47,6 @@ const statusLabel = (status?: string) => {
       return 'Cancelled';
     case 'picked_up':
       return 'Picked Up - Trip completed';
-    case 'pending_payment':
-      return 'Pending Payment';
     default:
       return status || 'Unknown';
   }
@@ -47,6 +58,7 @@ export default function ReservationStatusPage() {
   const searchParams = useSearchParams();
   const reservationId = searchParams.get('reservation_id') || '';
   const reservationToken = searchParams.get('reservation_token') || '';
+  const reservedFlag = searchParams.get('reserved') || '';
   const paymentFlag = searchParams.get('payment') || '';
   const paymentReference =
     searchParams.get('payment_reference') ||
@@ -62,16 +74,29 @@ export default function ReservationStatusPage() {
   const [operator, setOperator] = useState<{ name: string; email: string } | null>(
     null
   );
+  const [operatorFeedback, setOperatorFeedback] =
+    useState<ReservationOperatorFeedback | null>(null);
   const [messages, setMessages] = useState<ReservationMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [sending, setSending] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  const [isCreatingCheckout, setIsCreatingCheckout] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentModalError, setPaymentModalError] = useState('');
+  const [showRatingModal, setShowRatingModal] = useState(false);
+  const [ratingScore, setRatingScore] = useState(5);
+  const [ratingFeedback, setRatingFeedback] = useState('');
+  const [ratingSubmitting, setRatingSubmitting] = useState(false);
+  const [ratingError, setRatingError] = useState('');
   const [mounted, setMounted] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const chatBodyRef = React.useRef<HTMLDivElement | null>(null);
   const hasConfirmedPaymentRef = React.useRef(false);
   const chatRealtimeRef = React.useRef<RealtimeChannel | null>(null);
+  const reserveToastShownRef = React.useRef(false);
+  const paymentPromptShownRef = React.useRef(false);
+  const previousStatusRef = React.useRef('');
   const chatOpenRef = React.useRef(false);
   const seenMessagesInitializedRef = React.useRef(false);
   const seenMessageIdsRef = React.useRef<Set<string>>(new Set());
@@ -108,6 +133,7 @@ export default function ReservationStatusPage() {
       const data = await fetchReservationStatus(reservationId, reservationToken);
       setReservation(data.reservation);
       setOperator(data.operator);
+      setOperatorFeedback(data.feedback || null);
       setMessages(data.messages);
       return data;
     } catch (error: any) {
@@ -120,6 +146,111 @@ export default function ReservationStatusPage() {
       return null;
     } finally {
       setLoading(false);
+    }
+  };
+
+  const isAwaitingDownpayment =
+    String(reservation?.status || '').toLowerCase() === 'pending_payment';
+  const canRateOperator = (() => {
+    const status = String(reservation?.status || '').toLowerCase();
+    return (
+      !!reservationId &&
+      !!reservationToken &&
+      !!operator &&
+      (status === 'confirmed' ||
+        status === 'paid' ||
+        status === 'departed' ||
+        status === 'picked_up')
+    );
+  })();
+
+  const openRatingModal = () => {
+    setRatingScore(5);
+    setRatingFeedback('');
+    setRatingError('');
+    setShowRatingModal(true);
+  };
+
+  const handleSubmitOperatorRating = async () => {
+    if (!canRateOperator || !reservationId || !reservationToken) return;
+    if (operatorFeedback) {
+      setShowRatingModal(false);
+      return;
+    }
+    if (ratingScore < 1 || ratingScore > 5) {
+      setRatingError('Please select a rating from 1 to 5 stars.');
+      return;
+    }
+
+    setRatingSubmitting(true);
+    setRatingError('');
+    try {
+      const savedFeedback = await submitReservationOperatorFeedback({
+        reservationId,
+        reservationToken,
+        rating: ratingScore,
+        feedback: ratingFeedback,
+      });
+      setOperatorFeedback(savedFeedback);
+      setShowRatingModal(false);
+      sileoToast.success({
+        title: 'Thank you for your feedback',
+        description: 'Your operator rating was submitted successfully.',
+      });
+    } catch (error: any) {
+      const message = error?.message || 'Failed to submit operator rating.';
+      setRatingError(message);
+      sileoToast.error({
+        title: 'Rating failed',
+        description: message,
+      });
+    } finally {
+      setRatingSubmitting(false);
+    }
+  };
+
+  const handleStartDownpayment = async () => {
+    if (!reservationId || !reservation || isCreatingCheckout) return;
+    if (!isAwaitingDownpayment) {
+      sileoToast.info({
+        title: 'Payment not available yet',
+        description: 'Wait for operator approval before paying downpayment.',
+      });
+      return;
+    }
+
+    setIsCreatingCheckout(true);
+    setPaymentModalError('');
+    try {
+      const seatLabels = (reservation.seat_labels || [])
+        .map((seat) => String(seat || '').trim())
+        .filter(Boolean)
+        .join(', ');
+
+      const checkoutUrl = await createCheckoutSession({
+        amount: Number(reservation.amount_due || 0),
+        seatLabels,
+        fullName: reservation.full_name || 'Passenger',
+        passengerEmail: String(reservation.passenger_email || '')
+          .trim()
+          .toLowerCase(),
+        contactNumber: reservation.contact_number || '',
+        route: reservation.route || '',
+        reservationId: reservation.id,
+        operatorUserId: reservation.operator_user_id || undefined,
+        queueId: reservation.queue_id || undefined,
+      });
+
+      window.location.href = checkoutUrl;
+    } catch (error: any) {
+      const message = error?.message || 'Failed to start payment.';
+      setPaymentModalError(message);
+      sileoToast.error({
+        title: 'Payment failed',
+        description: message,
+      });
+    } finally {
+      setIsCreatingCheckout(false);
     }
   };
 
@@ -169,7 +300,7 @@ export default function ReservationStatusPage() {
           }
           sileoToast.success({
             title: 'Payment received',
-            description: 'Your reservation is now under operator review.',
+            description: 'Your downpayment is received. Reservation is now confirmed.',
           });
         } catch (error: any) {
           sileoToast.error({
@@ -188,6 +319,47 @@ export default function ReservationStatusPage() {
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reservationId, reservationToken, paymentFlag, paymentReference]);
+
+  useEffect(() => {
+    if (reservedFlag !== 'success' || reserveToastShownRef.current) return;
+    reserveToastShownRef.current = true;
+    sileoToast.success({
+      title: 'Reservation submitted',
+      description: 'Please wait for operator approval before paying downpayment.',
+    });
+  }, [reservedFlag]);
+
+  useEffect(() => {
+    const normalized = String(reservation?.status || '').toLowerCase();
+    if (!normalized) return;
+
+    const previous = previousStatusRef.current;
+    previousStatusRef.current = normalized;
+
+    if (normalized !== 'pending_payment') return;
+
+    if (!paymentPromptShownRef.current) {
+      paymentPromptShownRef.current = true;
+      setShowPaymentModal(true);
+      return;
+    }
+
+    if (previous && previous !== normalized) {
+      playNotificationSound();
+      setShowPaymentModal(true);
+      sileoToast.success({
+        title: 'Reservation approved',
+        description: 'Pay the downpayment now to finalize your seat.',
+      });
+    }
+  }, [reservation?.status]);
+
+  useEffect(() => {
+    const normalized = String(reservation?.status || '').toLowerCase();
+    if (normalized === 'pending_payment') return;
+    setShowPaymentModal(false);
+    setPaymentModalError('');
+  }, [reservation?.status]);
 
   useEffect(() => {
     if (!reservationId || !reservationToken) return;
@@ -221,7 +393,6 @@ export default function ReservationStatusPage() {
       }
       void supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reservationId, reservationToken]);
 
   const sortedMessages = useMemo(
@@ -286,6 +457,7 @@ export default function ReservationStatusPage() {
     }
 
     if (unreadIncrement > 0) {
+      playNotificationSound();
       setChatUnreadCount((prev) => prev + unreadIncrement);
     }
   }, [sortedMessages]);
@@ -438,6 +610,62 @@ export default function ReservationStatusPage() {
             </div>
           </div>
 
+          {String(reservation.status || '').toLowerCase() ===
+            'pending_operator_approval' && (
+            <div
+              className="mt-5 rounded-xl p-4"
+              style={{
+                background: 'rgba(245,158,11,0.12)',
+                border: '1px solid rgba(245,158,11,0.35)',
+                color: '#f59e0b',
+              }}
+            >
+              <p className="text-sm font-semibold">Waiting for operator approval</p>
+              <p className="text-xs mt-1">
+                Downpayment will open once your reservation is approved.
+              </p>
+            </div>
+          )}
+
+          {isAwaitingDownpayment && (
+            <div
+              className="mt-5 rounded-xl p-4"
+              style={{
+                background: 'rgba(37,151,233,0.12)',
+                border: '1px solid rgba(37,151,233,0.35)',
+              }}
+            >
+              <p className="text-sm font-semibold text-theme">
+                Your reservation is approved
+              </p>
+              <p className="text-xs text-muted-theme mt-1">
+                Please complete your downpayment to finalize your reservation.
+              </p>
+              <div className="mt-3 flex items-center gap-2">
+                <Button
+                  type="button"
+                  onClick={() => {
+                    setShowPaymentModal(true);
+                    setPaymentModalError('');
+                  }}
+                  className="h-9"
+                >
+                  Pay Downpayment
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="h-9"
+                  onClick={() => {
+                    void loadStatus({ silent: false });
+                  }}
+                >
+                  Refresh
+                </Button>
+              </div>
+            </div>
+          )}
+
           <div
             className="mt-6 pt-5 border-t"
             style={{ borderColor: 'var(--tg-border)' }}
@@ -451,6 +679,54 @@ export default function ReservationStatusPage() {
                   <FaCheckCircle style={{ color: '#22c55e' }} />
                   Linked to your queued van
                 </p>
+                {canRateOperator && !operatorFeedback && (
+                  <div className="pt-1">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="h-9"
+                      onClick={openRatingModal}
+                    >
+                      <FaStar size={12} className="mr-1.5" />
+                      Rate Operator
+                    </Button>
+                  </div>
+                )}
+                {operatorFeedback && (
+                  <div
+                    className="mt-3 rounded-xl p-3"
+                    style={{
+                      background: 'var(--tg-bg-alt)',
+                      border: '1px solid var(--tg-border)',
+                    }}
+                  >
+                    <p className="text-xs font-semibold text-muted-theme uppercase tracking-wide">
+                      Your Rating
+                    </p>
+                    <div className="mt-1.5 flex items-center gap-1">
+                      {Array.from({ length: 5 }, (_, idx) => (
+                        <FaStar
+                          key={`rated-star-${idx + 1}`}
+                          size={14}
+                          style={{
+                            color:
+                              idx + 1 <= Number(operatorFeedback.rating || 0)
+                                ? '#f59e0b'
+                                : '#9ca3af',
+                          }}
+                        />
+                      ))}
+                      <span className="ml-1 text-xs text-muted-theme">
+                        ({Number(operatorFeedback.rating || 0)}/5)
+                      </span>
+                    </div>
+                    {operatorFeedback.feedback && (
+                      <p className="mt-2 text-xs text-theme leading-relaxed">
+                        &ldquo;{operatorFeedback.feedback}&rdquo;
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <p className="text-muted-theme text-sm">
@@ -463,6 +739,168 @@ export default function ReservationStatusPage() {
 
       
     </main>
+
+    {showPaymentModal && (
+      <div
+        className="fixed inset-0 z-[140] flex items-center justify-center p-4"
+        style={{ background: 'rgba(2, 6, 23, 0.65)' }}
+        onClick={() => {
+          if (isCreatingCheckout) return;
+          setShowPaymentModal(false);
+        }}
+      >
+        <div
+          className="w-full max-w-lg card-glow rounded-2xl p-6"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 className="text-xl font-bold text-theme mb-2">
+            Reservation Confirmed
+          </h3>
+          <p className="text-sm text-muted-theme leading-relaxed">
+            Your reservation is approved by the operator. Please pay the
+            downpayment to finalize your seat.
+          </p>
+          <div
+            className="mt-4 p-3 rounded-xl text-sm"
+            style={{
+              background: 'var(--tg-bg-alt)',
+              border: '1px solid var(--tg-border)',
+            }}
+          >
+            <p className="text-muted-theme">Downpayment Amount</p>
+            <p className="text-theme font-bold text-lg">
+              PHP {Number(reservation.amount_due || 0).toFixed(2)}
+            </p>
+          </div>
+          {paymentModalError && (
+            <p className="mt-3 text-xs font-medium" style={{ color: '#ef4444' }}>
+              {paymentModalError}
+            </p>
+          )}
+          <div className="mt-6 flex items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setShowPaymentModal(false)}
+              disabled={isCreatingCheckout}
+            >
+              Later
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleStartDownpayment()}
+              disabled={isCreatingCheckout}
+            >
+              {isCreatingCheckout ? 'Opening checkout...' : 'Pay Now'}
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {showRatingModal && (
+      <div
+        className="fixed inset-0 z-[145] flex items-center justify-center p-4"
+        style={{ background: 'rgba(2, 6, 23, 0.65)' }}
+        onClick={() => {
+          if (ratingSubmitting) return;
+          setShowRatingModal(false);
+        }}
+      >
+        <div
+          className="w-full max-w-lg card-glow rounded-2xl p-6"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 className="text-xl font-bold text-theme mb-1">Rate Your Operator</h3>
+          <p className="text-sm text-muted-theme">
+            Your feedback helps commuters find trusted operators.
+          </p>
+
+          <div className="mt-4">
+            <p className="text-xs font-semibold text-muted-theme uppercase tracking-wider mb-2">
+              Rating
+            </p>
+            <div className="flex items-center gap-2">
+              {Array.from({ length: 5 }, (_, idx) => {
+                const value = idx + 1;
+                const active = value <= ratingScore;
+                return (
+                  <button
+                    key={`rating-input-${value}`}
+                    type="button"
+                    onClick={() => setRatingScore(value)}
+                    className="h-10 w-10 rounded-full flex items-center justify-center cursor-pointer transition"
+                    style={{
+                      background: active
+                        ? 'rgba(245,158,11,0.18)'
+                        : 'var(--tg-bg-alt)',
+                      border: active
+                        ? '1px solid rgba(245,158,11,0.55)'
+                        : '1px solid var(--tg-border)',
+                      color: active ? '#f59e0b' : '#9ca3af',
+                    }}
+                    title={`${value} star${value > 1 ? 's' : ''}`}
+                  >
+                    <FaStar size={16} />
+                  </button>
+                );
+              })}
+              <span className="text-sm text-muted-theme">{ratingScore}/5</span>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <label
+              htmlFor="rating-feedback-input"
+              className="text-xs font-semibold text-muted-theme uppercase tracking-wider"
+            >
+              Feedback (Optional)
+            </label>
+            <textarea
+              id="rating-feedback-input"
+              value={ratingFeedback}
+              onChange={(e) => setRatingFeedback(e.target.value.slice(0, 500))}
+              rows={4}
+              placeholder="Share your experience with this operator."
+              className="mt-2 w-full rounded-xl px-3 py-2 text-sm resize-none"
+              style={{
+                background: 'var(--tg-bg-alt)',
+                border: '1px solid var(--tg-border)',
+                color: 'var(--tg-text)',
+              }}
+              disabled={ratingSubmitting}
+            />
+            <p className="mt-1 text-[11px] text-muted-theme text-right">
+              {ratingFeedback.length}/500
+            </p>
+          </div>
+
+          {ratingError && (
+            <p className="mt-2 text-xs font-medium" style={{ color: '#ef4444' }}>
+              {ratingError}
+            </p>
+          )}
+
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setShowRatingModal(false)}
+              disabled={ratingSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleSubmitOperatorRating()}
+              disabled={ratingSubmitting}
+            >
+              {ratingSubmitting ? 'Submitting...' : 'Submit Rating'}
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
 
     {mounted &&
       createPortal(

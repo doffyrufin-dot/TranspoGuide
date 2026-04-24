@@ -5,7 +5,6 @@ import dynamic from 'next/dynamic';
 import 'leaflet/dist/leaflet.css';
 import {
   createReservationIntent,
-  createCheckoutSession,
   fetchTripSeatStatuses,
 } from '@/lib/services/payment.services';
 import {
@@ -175,8 +174,6 @@ const ReservationPage = () => {
   const [mapCoords, setMapCoords] = useState<[number, number] | null>(null);
   const [isPaying, setIsPaying] = useState(false);
   const [payError, setPayError] = useState('');
-  const [showPaymentNotice, setShowPaymentNotice] = useState(false);
-  const [paymentNoticeAccepted, setPaymentNoticeAccepted] = useState(false);
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [loadingQueue, setLoadingQueue] = useState(true);
   const [selectedQueueId, setSelectedQueueId] = useState<string | null>(null);
@@ -357,14 +354,12 @@ const ReservationPage = () => {
     selectedSeats.length > 0 &&
     hasActiveVan;
 
-  const proceedToPayment = async () => {
+  const submitReservation = async () => {
     if (!isFormValid || isPaying) return;
     setIsPaying(true);
     setPayError('');
 
     try {
-      const seatLabels = selectedSeats.map((s) => s.label).join(', ');
-
       const intent = await createReservationIntent({
         fullName,
         passengerEmail: passengerEmail.trim().toLowerCase(),
@@ -378,31 +373,16 @@ const ReservationPage = () => {
         operatorUserId: selectedQueue?.operatorUserId,
       });
 
-      const checkoutUrl = await createCheckoutSession({
-        amount: totalDown,
-        seatLabels,
-        fullName,
-        passengerEmail: passengerEmail.trim().toLowerCase(),
-        contactNumber,
-        route: activeRoute,
-        reservationId: intent.reservation_id,
-        operatorUserId: selectedQueue?.operatorUserId,
-        queueId: selectedQueue?.id,
-      });
-
-      // Redirect to PayMongo checkout
-      window.location.href = checkoutUrl;
+      window.location.href = `/reservation/status?reservation_id=${encodeURIComponent(
+        intent.reservation_id
+      )}&reservation_token=${encodeURIComponent(
+        intent.guest_token
+      )}&reserved=success`;
     } catch (error: any) {
       setPayError(error?.message || 'Network error. Please try again.');
     } finally {
       setIsPaying(false);
     }
-  };
-
-  const handlePayment = () => {
-    if (!isFormValid || isPaying) return;
-    setPaymentNoticeAccepted(false);
-    setShowPaymentNotice(true);
   };
 
   return (
@@ -422,8 +402,8 @@ const ReservationPage = () => {
             </span>
           </h1>
           <p className="mt-4 text-muted-theme text-lg max-w-xl mx-auto">
-            Pick your preferred seat, fill in your details, and secure your ride
-            with a quick down payment.
+            Pick your preferred seat and submit your request. Downpayment is only
+            required after operator confirmation.
           </p>
         </div>
       </section>
@@ -854,14 +834,14 @@ const ReservationPage = () => {
               </form>
             </div>
 
-            {/* Payment summary */}
+            {/* Reservation summary */}
             <div className="card-glow p-6 md:p-8 rounded-2xl">
               <h2 className="text-theme font-bold text-xl mb-1 flex items-center gap-2">
-                <FaMoneyBillWave style={{ color: 'var(--primary)' }} /> Payment
+                <FaMoneyBillWave style={{ color: 'var(--primary)' }} /> Reservation
                 Summary
               </h2>
               <p className="text-muted-theme text-sm mb-5">
-                Review your booking before paying
+                Review your booking before submitting your request
               </p>
 
               <div className="mb-6">
@@ -921,7 +901,7 @@ const ReservationPage = () => {
               </div>
 
               <button
-                onClick={handlePayment}
+                onClick={() => void submitReservation()}
                 disabled={!isFormValid || isPaying}
                 className="btn-primary  w-full text-base group"
                 style={
@@ -955,8 +935,7 @@ const ReservationPage = () => {
                   </>
                 ) : (
                   <>
-                    <FaMoneyBillWave /> Pay Down Payment — ₱
-                    {totalDown.toFixed(2)}
+                    <FaMoneyBillWave /> Submit Reservation Request
                     <FaArrowRight
                       size={14}
                       className="ml-auto group-hover:translate-x-1 transition-transform"
@@ -976,73 +955,12 @@ const ReservationPage = () => {
 
               <p className="mt-3 text-center text-xs text-muted-theme flex items-center justify-center gap-1.5">
                 <FaCheckCircle style={{ color: 'var(--primary)' }} size={11} />
-                You will be redirected to PayMongo to complete your payment
+                Downpayment will be requested once the operator confirms your request
               </p>
             </div>
           </div>
         </div>
       </section>
-
-      {showPaymentNotice && (
-        <div
-          className="fixed inset-0 z-[120] flex items-center justify-center p-4"
-          style={{ background: 'rgba(2, 6, 23, 0.65)' }}
-          onClick={() => setShowPaymentNotice(false)}
-        >
-          <div
-            className="w-full max-w-lg card-glow rounded-2xl p-6"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-xl font-bold text-theme mb-2">Payment Terms</h3>
-            <p className="text-sm text-muted-theme leading-relaxed">
-              Please review before proceeding. The down payment is used to secure
-              your selected seat and queue slot.
-            </p>
-            <ul className="mt-4 space-y-2 text-sm text-theme">
-              <li>- Down payment is non-refundable once payment is completed.</li>
-              <li>- Reservation is subject to operator verification and route availability.</li>
-              <li>- Fake or duplicate reservations may be cancelled by the operator/admin.</li>
-            </ul>
-
-            <label className="mt-5 flex items-start gap-2 text-sm text-theme cursor-pointer">
-              <input
-                type="checkbox"
-                checked={paymentNoticeAccepted}
-                onChange={(e) => setPaymentNoticeAccepted(e.target.checked)}
-                className="mt-0.5"
-              />
-              <span>I agree to the payment terms and non-refundable policy.</span>
-            </label>
-
-            <div className="mt-6 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowPaymentNotice(false)}
-                className="btn-outline px-4 py-2 text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (!paymentNoticeAccepted || isPaying) return;
-                  setShowPaymentNotice(false);
-                  void proceedToPayment();
-                }}
-                disabled={!paymentNoticeAccepted || isPaying}
-                className="btn-primary px-4 py-2 text-sm"
-                style={
-                  !paymentNoticeAccepted || isPaying
-                    ? { opacity: 0.5, cursor: 'not-allowed' }
-                    : {}
-                }
-              >
-                Agree and Proceed
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </main>
   );
 };

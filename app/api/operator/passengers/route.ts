@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-const hiddenStatuses = ['cancelled', 'rejected', 'picked_up'];
 const activeQueueStatuses = ['boarding', 'queued'];
+const pickupEligibleStatuses = ['confirmed', 'paid'];
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 50;
 
@@ -22,6 +22,20 @@ const toPositiveInt = (value: string | null, fallback: number) => {
   const normalized = Math.floor(parsed);
   if (normalized <= 0) return fallback;
   return normalized;
+};
+
+const normalizeRoute = (value?: string | null) =>
+  String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const toTitleRoute = (value?: string | null) => {
+  const normalized = normalizeRoute(value).toLowerCase();
+  if (!normalized) return '';
+  return normalized
+    .split(' ')
+    .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+    .join(' ');
 };
 
 export async function GET(req: NextRequest) {
@@ -89,8 +103,7 @@ export async function GET(req: NextRequest) {
       return timeB - timeA;
     });
 
-    const currentQueue = prioritizedQueues[0];
-    if (!currentQueue) {
+    if (prioritizedQueues.length === 0) {
       return NextResponse.json({
         queue: null,
         passengers: [],
@@ -106,55 +119,141 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const departureLabel = toTimeLabel(currentQueue.departure_time || null);
     const todayTripDate = new Date().toISOString().slice(0, 10);
-    const departureDate = currentQueue.departure_time
-      ? new Date(currentQueue.departure_time)
-      : null;
-    const departureTripDate =
-      departureDate && !Number.isNaN(departureDate.getTime())
-        ? departureDate.toISOString().slice(0, 10)
-        : '';
+    const queueCandidates = prioritizedQueues.map((queue) => {
+      const departureLabel = toTimeLabel(queue.departure_time || null);
+      const departureDate = queue.departure_time
+        ? new Date(queue.departure_time)
+        : null;
+      const departureTripDate =
+        departureDate && !Number.isNaN(departureDate.getTime())
+          ? departureDate.toISOString().slice(0, 10)
+          : '';
 
-    const tripKeyCandidates =
-      currentQueue.route && departureLabel
+      const normalizedRoute = normalizeRoute(queue.route);
+      const routeVariants = normalizedRoute
         ? Array.from(
-            new Set(
-              [todayTripDate, departureTripDate]
-                .filter(Boolean)
-                .map(
-                  (tripDate) =>
-                    `${currentQueue.route}|${departureLabel}|${tripDate}`
-                )
-            )
+            new Set([
+              normalizedRoute,
+              normalizedRoute.toLowerCase(),
+              toTitleRoute(normalizedRoute),
+            ].filter(Boolean))
           )
         : [];
+      const tripDates = [todayTripDate, departureTripDate].filter(Boolean);
+      const tripKeyCandidates =
+        routeVariants.length > 0 && departureLabel
+          ? Array.from(
+              new Set(
+                routeVariants.flatMap((routeVariant) =>
+                  tripDates.map(
+                    (tripDate) => `${routeVariant}|${departureLabel}|${tripDate}`
+                  )
+                )
+              )
+            )
+          : [];
 
-    const activeTripKey = tripKeyCandidates[0] || null;
+      return {
+        queue,
+        tripKeyCandidates,
+        activeTripKey: tripKeyCandidates[0] || null,
+      };
+    });
 
-    const buildReservationQuery = () => {
-      let query = serviceClient
-        .from('tbl_reservations')
-        .select(
-          'id, full_name, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at',
-          { count: 'exact' }
-        )
+    const applyReservationFilters = (
+      query: any,
+      candidate: (typeof queueCandidates)[number],
+      options?: { skipTripKey?: boolean }
+    ) => {
+      let next = query
         .eq('operator_user_id', user.id)
-        .eq('queue_id', currentQueue.id)
-        .not('status', 'in', `(${hiddenStatuses.join(',')})`);
+        .eq('queue_id', candidate.queue.id)
+        .in('status', pickupEligibleStatuses);
 
-      if (tripKeyCandidates.length === 1) {
-        query = query.eq('trip_key', tripKeyCandidates[0]);
-      } else if (tripKeyCandidates.length > 1) {
-        query = query.in('trip_key', tripKeyCandidates);
+      if (!options?.skipTripKey) {
+        if (candidate.tripKeyCandidates.length === 1) {
+          next = next.eq('trip_key', candidate.tripKeyCandidates[0]);
+        } else if (candidate.tripKeyCandidates.length > 1) {
+          next = next.in('trip_key', candidate.tripKeyCandidates);
+        }
       }
-      return query;
+      return next;
     };
+
+    let selectedCandidate = queueCandidates[0];
+    let preloadedTotal = 0;
+    let tripKeyFilterSkipped = false;
+    for (const candidate of queueCandidates) {
+      const { count, error } = await applyReservationFilters(
+        serviceClient.from('tbl_reservations').select('id', {
+          count: 'exact',
+          head: true,
+        }),
+        candidate
+      );
+      if (error) {
+        return NextResponse.json(
+          { error: error.message || 'Failed to load passengers.' },
+          { status: 500 }
+        );
+      }
+      const candidateTotal = Number(count || 0);
+      if (candidateTotal > 0) {
+        selectedCandidate = candidate;
+        preloadedTotal = candidateTotal;
+        break;
+      }
+    }
+
+    // Fallback: if no strict trip_key match, show same queue/status passengers.
+    // This prevents blank Passenger tab when route text casing differs in trip_key.
+    if (preloadedTotal === 0) {
+      for (const candidate of queueCandidates) {
+        const { count, error } = await applyReservationFilters(
+          serviceClient.from('tbl_reservations').select('id', {
+            count: 'exact',
+            head: true,
+          }),
+          candidate,
+          { skipTripKey: true }
+        );
+        if (error) {
+          return NextResponse.json(
+            { error: error.message || 'Failed to load passengers.' },
+            { status: 500 }
+          );
+        }
+        const candidateTotal = Number(count || 0);
+        if (candidateTotal > 0) {
+          selectedCandidate = candidate;
+          preloadedTotal = candidateTotal;
+          tripKeyFilterSkipped = true;
+          break;
+        }
+      }
+    }
+
+    const currentQueue = selectedCandidate.queue;
+    const activeTripKey = tripKeyFilterSkipped
+      ? null
+      : selectedCandidate.activeTripKey;
 
     const fetchPassengerPage = async (page: number) => {
       const from = (page - 1) * pageSize;
       const to = from + pageSize - 1;
-      return buildReservationQuery()
+      const query = applyReservationFilters(
+        serviceClient
+          .from('tbl_reservations')
+        .select(
+          'id, full_name, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at',
+          { count: 'exact' }
+        ),
+        selectedCandidate,
+        { skipTripKey: tripKeyFilterSkipped }
+      );
+
+      return query
         .order('created_at', { ascending: false })
         .range(from, to);
     };
@@ -171,7 +270,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const total = Number(firstPageResult.count || 0);
+    const total = Math.max(preloadedTotal, Number(firstPageResult.count || 0));
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
     if (total > 0 && page > totalPages) {

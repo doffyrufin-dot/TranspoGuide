@@ -71,6 +71,7 @@ const resolveOperatorSecretKey = async (params: {
     null;
 
   if (!operatorUserId) {
+    // Legacy/global fallback is only allowed when no operator is linked.
     if (PAYMONGO_SECRET_KEY) {
       return {
         secretKey: PAYMONGO_SECRET_KEY,
@@ -99,13 +100,9 @@ const resolveOperatorSecretKey = async (params: {
     };
   }
 
-  if (PAYMONGO_SECRET_KEY) {
-    return {
-      secretKey: PAYMONGO_SECRET_KEY,
-      operatorUserId,
-    };
-  }
-  throw new Error('Operator payment account key is not configured.');
+  throw new Error(
+    'Operator payout account is not configured yet. Please ask the operator to complete PayMongo setup in Settings.'
+  );
 };
 
 const resolveReservationToken = async (reservationId: string) => {
@@ -132,29 +129,103 @@ export async function POST(req: NextRequest) {
   try {
     const baseUrl = resolveBaseUrl(req);
     const body = await req.json();
-    const {
-      amount,
-      seatLabels,
-      fullName,
-      passengerEmail,
-      contactNumber,
-      route,
-      reservationId,
-      operatorUserId,
-      queueId,
-    } = body;
+    const reservationId = String(body?.reservationId || '').trim();
 
-    if (!reservationId || typeof reservationId !== 'string') {
+    if (!reservationId) {
       return NextResponse.json({ error: 'Missing reservation ID.' }, { status: 400 });
     }
+
+    const supabase = getServiceClient();
+    const { data: reservationRows, error: reservationError } = await supabase
+      .from('tbl_reservations')
+      .select(
+        'id, status, full_name, passenger_email, contact_number, route, seat_labels, amount_due, operator_user_id, queue_id'
+      )
+      .eq('id', reservationId)
+      .limit(1);
+
+    if (reservationError) {
+      return NextResponse.json(
+        { error: reservationError.message || 'Failed to load reservation.' },
+        { status: 500 }
+      );
+    }
+
+    const reservation = (reservationRows?.[0] || null) as
+      | {
+          id: string;
+          status?: string | null;
+          full_name?: string | null;
+          passenger_email?: string | null;
+          contact_number?: string | null;
+          route?: string | null;
+          seat_labels?: string[] | null;
+          amount_due?: number | null;
+          operator_user_id?: string | null;
+          queue_id?: string | null;
+        }
+      | null;
+
+    if (!reservation) {
+      return NextResponse.json({ error: 'Reservation not found.' }, { status: 404 });
+    }
+
+    const normalizedStatus = String(reservation.status || '').toLowerCase();
+    if (normalizedStatus !== 'pending_payment') {
+      return NextResponse.json(
+        {
+          error:
+            'Reservation is not ready for downpayment yet. Please wait for operator confirmation.',
+        },
+        { status: 409 }
+      );
+    }
+
+    const fullName = String(reservation.full_name || body?.fullName || 'Passenger').trim();
+    const passengerEmail = String(
+      reservation.passenger_email || body?.passengerEmail || ''
+    )
+      .trim()
+      .toLowerCase();
+    const contactNumber = String(
+      reservation.contact_number || body?.contactNumber || ''
+    ).trim();
+    const route = String(reservation.route || body?.route || '').trim();
+    const seatLabels = Array.isArray(reservation.seat_labels)
+      ? reservation.seat_labels.map((seat) => String(seat || '').trim()).filter(Boolean).join(', ')
+      : String(body?.seatLabels || '').trim();
+    const amountValue = Number(reservation.amount_due || body?.amount || 0);
+    const operatorUserId = String(
+      reservation.operator_user_id || body?.operatorUserId || ''
+    ).trim();
+    const queueId = String(reservation.queue_id || body?.queueId || '').trim();
+
     if (!isValidEmail(passengerEmail || '')) {
       return NextResponse.json(
         { error: 'Invalid passenger email.' },
         { status: 400 }
       );
     }
+    if (!route) {
+      return NextResponse.json(
+        { error: 'Missing reservation route.' },
+        { status: 400 }
+      );
+    }
+    if (!seatLabels) {
+      return NextResponse.json(
+        { error: 'Missing seat labels.' },
+        { status: 400 }
+      );
+    }
+    if (!Number.isFinite(amountValue) || amountValue <= 0) {
+      return NextResponse.json(
+        { error: 'Invalid downpayment amount.' },
+        { status: 400 }
+      );
+    }
 
-    const amountInCentavos = Math.round(Number(amount || 0) * 100);
+    const amountInCentavos = Math.round(amountValue * 100);
     const { secretKey: resolvedSecretKey, operatorUserId: resolvedOperatorUserId } =
       await resolveOperatorSecretKey({
       reservationId,
@@ -222,7 +293,6 @@ export async function POST(req: NextRequest) {
     const checkoutSessionId = (data?.data?.id || '').toString().trim();
 
     if (checkoutSessionId) {
-      const supabase = getServiceClient();
       await supabase
         .from('tbl_reservations')
         .update({
@@ -238,9 +308,15 @@ export async function POST(req: NextRequest) {
     });
   } catch (error: any) {
     console.error('Checkout error:', error);
+    const message = String(error?.message || 'Internal server error');
+    const lower = message.toLowerCase();
+    const isSetupError =
+      lower.includes('payout account is not configured') ||
+      lower.includes('payment account key is not configured') ||
+      lower.includes('complete paymongo setup');
     return NextResponse.json(
-      { error: error.message || 'Internal server error' },
-      { status: 500 }
+      { error: message },
+      { status: isSetupError ? 409 : 500 }
     );
   }
 }

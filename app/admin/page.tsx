@@ -30,6 +30,7 @@ import BookingsTab from './tabs/BookingsTab';
 import DriversStaffTab from './tabs/DriversStaffTab';
 import ApplicationsTab from './tabs/ApplicationsTab';
 import ReportsTab from './tabs/ReportsTab';
+import playNotificationSound from '@/lib/utils/notification-sound';
 
 const isAbortLikeError = (error: unknown) => {
   if (!error || typeof error !== 'object') return false;
@@ -59,6 +60,8 @@ export default function AdminDashboard() {
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifUnreadCount, setNotifUnreadCount] = useState(0);
   const [notifications, setNotifications] = useState<DashboardNotification[]>([]);
+  const notifSoundReadyRef = React.useRef(false);
+  const notifTopIdRef = React.useRef('');
   const [applicationsFilter, setApplicationsFilter] = useState<
     'All' | 'Pending' | 'Approved' | 'Rejected'
   >('All');
@@ -182,7 +185,20 @@ export default function AdminDashboard() {
       if (!res.ok) {
         throw new Error(data.error || 'Failed to load notifications.');
       }
-      setNotifications((data.notifications || []) as DashboardNotification[]);
+      const nextNotifications = (data.notifications || []) as DashboardNotification[];
+      const nextTopId = String(nextNotifications[0]?.id || '').trim();
+      if (
+        notifSoundReadyRef.current &&
+        nextTopId &&
+        nextTopId !== notifTopIdRef.current
+      ) {
+        playNotificationSound();
+      }
+      if (!notifSoundReadyRef.current) {
+        notifSoundReadyRef.current = true;
+      }
+      notifTopIdRef.current = nextTopId;
+      setNotifications(nextNotifications);
       if (!notifOpen) {
         setNotifUnreadCount(Number(data.unreadCount || 0));
       }

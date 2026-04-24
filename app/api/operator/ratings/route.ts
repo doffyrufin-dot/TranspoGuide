@@ -1,29 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { listReservationsByOperator } from '@/lib/db/reservations';
-
-const isFinalStatus = (status?: string | null) => {
-  const s = (status || '').toLowerCase();
-  return (
-    s === 'pending_payment' ||
-    s === 'confirmed' ||
-    s === 'cancelled' ||
-    s === 'rejected' ||
-    s === 'picked_up' ||
-    s === 'departed'
-  );
-};
-
-const isPendingStatus = (status?: string | null) => {
-  const s = (status || '').toLowerCase();
-  return s === 'pending_operator_approval';
-};
+import { getOperatorRatingSummary } from '@/lib/db/operator-feedback';
 
 export async function GET(req: NextRequest) {
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    if (!supabaseUrl || !anonKey) {
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!supabaseUrl || !supabaseAnonKey) {
       return NextResponse.json({ error: 'server_env_missing' }, { status: 500 });
     }
 
@@ -35,10 +18,11 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'missing_auth_token' }, { status: 401 });
     }
 
-    const authClient = createClient(supabaseUrl, anonKey, {
+    const authClient = createClient(supabaseUrl, supabaseAnonKey, {
       auth: { persistSession: false, autoRefreshToken: false },
       global: { headers: { Authorization: `Bearer ${token}` } },
     });
+
     const {
       data: { user },
       error: userError,
@@ -47,17 +31,11 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
     }
 
-    const rows = await listReservationsByOperator(user.id, 120);
-    const pending = rows.filter((r: any) => isPendingStatus(r.status));
-    const history = rows.filter((r: any) => isFinalStatus(r.status));
-
-    return NextResponse.json({
-      pending,
-      history,
-    });
+    const summary = await getOperatorRatingSummary(user.id, 5);
+    return NextResponse.json(summary);
   } catch (error: any) {
     return NextResponse.json(
-      { error: error?.message || 'Failed to load reservations.' },
+      { error: error?.message || 'Failed to load operator ratings.' },
       { status: 500 }
     );
   }

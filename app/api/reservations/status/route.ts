@@ -3,6 +3,7 @@ import {
   getReservationById,
   getReservationMessages,
 } from '@/lib/db/reservations';
+import { getReservationOperatorFeedback } from '@/lib/db/operator-feedback';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,12 +28,16 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'Reservation not found.' }, { status: 404 });
     }
 
-    const messages = await getReservationMessages(reservationId);
+    const [messages, feedback] = await Promise.all([
+      getReservationMessages(reservationId),
+      getReservationOperatorFeedback(reservationId),
+    ]);
     return NextResponse.json(
       {
         reservation: data.reservation,
         operator: data.operator,
         messages,
+        feedback,
       },
       {
         headers: {

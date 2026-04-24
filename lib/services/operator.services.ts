@@ -110,9 +110,36 @@ export interface OperatorPaymentHistoryResult {
   };
 }
 
+export interface OperatorRatingFeedbackItem {
+  id: string;
+  reservation_id: string;
+  rating: number;
+  feedback: string | null;
+  commuter_name: string | null;
+  created_at: string;
+}
+
+export interface OperatorRatingSummaryResult {
+  average_rating: number;
+  review_count: number;
+  trusted: boolean;
+  recent_feedback: OperatorRatingFeedbackItem[];
+}
+
 export interface OperatorReservationListResult {
   pending: OperatorReservationRecord[];
   history: OperatorReservationRecord[];
+}
+
+export interface OperatorPaymentAccountStatusResult {
+  setupRequired: boolean;
+  hasActiveAccount: boolean;
+  hasSecretKey: boolean;
+  hasWebhookSecret: boolean;
+  webhookSecretSupported: boolean;
+  applicationStatus: 'pending' | 'approved' | 'rejected' | null;
+  activeAccountId: string | null;
+  maskedSecretKey: string | null;
 }
 
 export async function fetchOperatorPaymentHistory(
@@ -280,6 +307,56 @@ export async function fetchOperatorChatConversations(
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
+}
+
+export async function fetchOperatorRatingSummary(
+  accessToken: string
+): Promise<OperatorRatingSummaryResult> {
+  const { data } = await http.get<OperatorRatingSummaryResult>(
+    '/api/operator/ratings',
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
+}
+
+export async function fetchOperatorPaymentAccountStatus(
+  accessToken: string
+): Promise<OperatorPaymentAccountStatusResult> {
+  const { data } = await http.get<OperatorPaymentAccountStatusResult>(
+    '/api/operator/payment-account',
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
+}
+
+export async function saveOperatorPaymentAccount(input: {
+  accessToken: string;
+  paymongoSecretKey: string;
+  paymongoWebhookSecret?: string;
+}): Promise<OperatorPaymentAccountStatusResult> {
+  const { data } = await http.put<OperatorPaymentAccountStatusResult>(
+    '/api/operator/payment-account',
+    {
+      paymongoSecretKey: input.paymongoSecretKey,
+      paymongoWebhookSecret: input.paymongoWebhookSecret || '',
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
       },
     }
   );

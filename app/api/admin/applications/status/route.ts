@@ -43,7 +43,7 @@ async function sendStatusEmail(params: {
     ? 'Your operator application is approved'
     : 'Your operator application was not approved';
   const body = approved
-    ? 'Good news. You can now sign in and access your operator dashboard.'
+    ? 'Good news. You can now sign in and access your operator dashboard. After login, open Settings and add your PayMongo Secret Key so online downpayments go directly to your account.'
     : 'Your application is currently rejected. Please review your details and update your registration.';
   const appBaseUrl =
     (process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || '').trim() ||
