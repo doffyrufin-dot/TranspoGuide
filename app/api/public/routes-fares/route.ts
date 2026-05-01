@@ -1,6 +1,102 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
+const HIGHWAY_BRGY_ORDER = [
+  'libertad',
+  'matlang',
+  'bilwang',
+  'tubod',
+  'tolingon',
+  'apale',
+];
+const BARANGAY_MIN_FARE = 10;
+const BARANGAY_HOP_INCREMENT = 1;
+
+const normalizeBarangayName = (value: string) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^barangay\s+/i, '')
+    .replace(/\s+/g, ' ');
+
+const roundMoney = (value: number) =>
+  Number.isFinite(value) ? Number(value.toFixed(2)) : 0;
+
+const buildBarangayToBarangayRows = (
+  barangayRows: any[]
+) => {
+  const highwayRows = (barangayRows || [])
+    .map((row) => {
+      const normalized = normalizeBarangayName(row?.barangay_name || '');
+      const orderIndex = HIGHWAY_BRGY_ORDER.indexOf(normalized);
+      if (orderIndex < 0) return null;
+      return {
+        id: String(row?.id || ''),
+        barangayName: String(row?.barangay_name || ''),
+        normalizedName: normalized,
+        orderIndex,
+        tricycleFare: Number(row?.tricycle_base_fare || 0),
+        distanceKm: Number(row?.distance_km || 0),
+      };
+    })
+    .filter(Boolean) as Array<{
+    id: string;
+    barangayName: string;
+    normalizedName: string;
+    orderIndex: number;
+    tricycleFare: number;
+    distanceKm: number;
+  }>;
+
+  if (highwayRows.length < 2) return [];
+
+      const sorted = [...highwayRows].sort((a, b) => a.orderIndex - b.orderIndex);
+      const rows: any[] = [];
+
+  for (let i = 0; i < sorted.length; i += 1) {
+    for (let j = i + 1; j < sorted.length; j += 1) {
+      const from = sorted[i];
+      const to = sorted[j];
+      const hops = Math.abs(to.orderIndex - from.orderIndex);
+      if (hops <= 0) continue;
+
+      const forwardFare = roundMoney(
+        BARANGAY_MIN_FARE + (hops - 1) * BARANGAY_HOP_INCREMENT
+      );
+      const segmentDistance = Math.abs(
+        Number(to.distanceKm || 0) - Number(from.distanceKm || 0)
+      );
+      const distanceKm = segmentDistance > 0 ? roundMoney(segmentDistance) : null;
+
+      rows.push({
+        id: `barangay-hop-${from.id}-${to.id}-trycicle`,
+        origin: from.barangayName,
+        destination: to.barangayName,
+        vehicle_type: 'Trycicle',
+        vehicle_image_url: null,
+        regular_fare: forwardFare,
+        discount_rate: 0,
+        distance_km: distanceKm,
+        source: 'barangay_fare',
+      });
+
+      rows.push({
+        id: `barangay-hop-${to.id}-${from.id}-trycicle`,
+        origin: to.barangayName,
+        destination: from.barangayName,
+        vehicle_type: 'Trycicle',
+        vehicle_image_url: null,
+        regular_fare: forwardFare,
+        discount_rate: 0,
+        distance_km: distanceKm,
+        source: 'barangay_fare',
+      });
+    }
+  }
+
+  return rows;
+};
+
 const estimateBarangayFareByVehicle = (
   vehicleType: string,
   distanceKm: number,
@@ -49,7 +145,7 @@ export async function GET() {
     const { data, error } = await supabase
       .from('tbl_route_fares')
       .select(
-        'id, origin, destination, vehicle_type, regular_fare, discount_rate, distance_km, vehicle:tbl_vehicle_types(name, image_url)'
+        'id, origin, destination, vehicle_type, vehicle_image_url, regular_fare, discount_rate, distance_km, vehicle:tbl_vehicle_types(name, image_url)'
       )
       .eq('is_active', true)
       .order('origin', { ascending: true })
@@ -66,7 +162,7 @@ export async function GET() {
     const { data: barangayRows, error: barangayError } = await supabase
       .from('tbl_barangay_fares')
       .select(
-        'id, barangay_name, distance_km, tricycle_base_fare, per_km_increase, is_highway, allowed_vehicle_types, is_active'
+        'id, barangay_name, distance_km, tricycle_base_fare, is_highway, allowed_vehicle_types, is_active'
       )
       .eq('is_active', true)
       .order('barangay_name', { ascending: true });
@@ -83,6 +179,10 @@ export async function GET() {
       origin: row.origin || '',
       destination: row.destination || '',
       vehicle_type: row.vehicle_type || row.vehicle?.name || '',
+      vehicle_image_url:
+        typeof row.vehicle_image_url === 'string' && row.vehicle_image_url.trim()
+          ? row.vehicle_image_url.trim()
+          : row.vehicle?.image_url || null,
       regular_fare: Number(row.regular_fare || 0),
       discount_rate: Number(row.discount_rate || 0.2),
       distance_km: row.distance_km == null ? null : Number(row.distance_km),
@@ -108,9 +208,7 @@ export async function GET() {
     const barangayMapped = (barangayRows || []).flatMap((row: any) => {
       const base = Number(row.tricycle_base_fare || 0);
       const distance = Number(row.distance_km || 0);
-      const perKm = Number(row.per_km_increase || 0);
-
-      const tricycleFare = base + distance * perKm;
+      const tricycleFare = base;
       const allowedVehicles = Array.isArray(row.allowed_vehicle_types)
         ? (row.allowed_vehicle_types as string[])
         : [];
@@ -144,19 +242,25 @@ export async function GET() {
           origin: 'Isabel',
           destination: row.barangay_name || '',
           vehicle_type: vehicleType,
+          vehicle_image_url: null,
           regular_fare:
             vehicleKey.includes('trycicle') || vehicleKey.includes('tricycle')
               ? tricycleFare
               : Number(genericFare?.regular_fare || estimatedVehicleFare),
-          discount_rate: Number(genericFare?.discount_rate || 0.2),
+          // Barangay routes do not have discounted fares.
+          discount_rate: 0,
           distance_km: distance,
           source: 'barangay_fare',
         };
       });
     });
 
+    const barangayToBarangayRows = buildBarangayToBarangayRows(
+      barangayRows || []
+    );
+
     return NextResponse.json({
-      rows: [...routeRows, ...barangayMapped],
+      rows: [...routeRows, ...barangayMapped, ...barangayToBarangayRows],
     });
   } catch (error: any) {
     return NextResponse.json(

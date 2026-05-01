@@ -1,9 +1,11 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import Image from 'next/image';
 import { supabase } from '@/utils/supabase/client';
 import sileoToast from '@/lib/utils/sileo-toast';
+import { resolveVehicleImageUrl } from '@/lib/utils/vehicle-image';
 import { Bus, Map as MapIcon, Pencil, Plus, Trash2, X } from 'lucide-react';
 
 type VehicleTypeRow = { id: string; name: string; image_url: string | null; is_active: boolean };
@@ -24,6 +26,7 @@ type RouteFareRow = {
   distance_km: number | null;
   vehicle_type_id: string | null;
   vehicle_type: string;
+  vehicle_image_url: string | null;
   regular_fare: number;
   discount_rate: number;
   is_active: boolean;
@@ -34,7 +37,6 @@ type BarangayFareRow = {
   barangay_name: string;
   distance_km: number;
   tricycle_base_fare: number;
-  per_km_increase: number;
   allowed_vehicle_types: string[] | null;
   is_highway: boolean;
   is_active: boolean;
@@ -75,18 +77,61 @@ const normalizeName = (value: string) =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join(' ');
 
+const normalizeImageUrl = (value: string) => {
+  const normalized = String(value || '').trim();
+  return normalized || '';
+};
+
+const fetchSuggestedTravelMinutes = async (input: {
+  origin: string;
+  destination: string;
+  vehicleType: string;
+  distanceKm: number;
+}) => {
+  if (!input.origin.trim() || !input.destination.trim() || !input.vehicleType.trim()) {
+    return null;
+  }
+  if (!Number.isFinite(input.distanceKm) || input.distanceKm <= 0) {
+    return null;
+  }
+
+  try {
+    const response = await fetch('/api/public/route-metrics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        routes: [
+          {
+            origin: input.origin,
+            destination: input.destination,
+            vehicle_type: input.vehicleType,
+            distance_km: input.distanceKm,
+          },
+        ],
+      }),
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok) return null;
+    const metric = Array.isArray(result?.metrics) ? result.metrics[0] : null;
+    const minutes = Number(metric?.duration_minutes || 0);
+    return Number.isFinite(minutes) && minutes > 0 ? Math.max(1, Math.round(minutes)) : null;
+  } catch {
+    return null;
+  }
+};
+
 const ROUTE_EDIT_INITIAL = {
   distance_km: '',
   travel_time_minutes: '',
   regular_fare: '',
   discount_rate: '0.20',
+  vehicle_image_url: '',
 };
 
 const BARANGAY_EDIT_INITIAL = {
   barangay_name: '',
   distance_km: '',
   tricycle_base_fare: '15',
-  per_km_increase: '2',
   is_highway: true,
   allowed_vehicle_types: ['Bus', 'Minibus', 'Multicab', 'Trycicle'] as string[],
 };
@@ -99,8 +144,12 @@ export default function RoutesFaresTab() {
   const [barangaySaving, setBarangaySaving] = useState(false);
   const [routeDeletingId, setRouteDeletingId] = useState('');
   const [barangayDeletingId, setBarangayDeletingId] = useState('');
+  const [routeTimeLoading, setRouteTimeLoading] = useState(false);
+  const [routeEditTimeLoading, setRouteEditTimeLoading] = useState(false);
   const [routeEditingRow, setRouteEditingRow] = useState<RouteFareRow | null>(null);
   const [routeUpdating, setRouteUpdating] = useState(false);
+  const [routeImageUploading, setRouteImageUploading] = useState(false);
+  const [routeEditImageUploading, setRouteEditImageUploading] = useState(false);
   const [barangayEditingRow, setBarangayEditingRow] = useState<BarangayFareRow | null>(null);
   const [barangayUpdating, setBarangayUpdating] = useState(false);
   const [routeRows, setRouteRows] = useState<RouteFareRow[]>([]);
@@ -116,6 +165,7 @@ export default function RoutesFaresTab() {
     travel_time_minutes: '',
     regular_fare: '',
     discount_rate: '0.20',
+    vehicle_image_url: '',
   });
   const [routeEditForm, setRouteEditForm] = useState(ROUTE_EDIT_INITIAL);
   const [barangayEditForm, setBarangayEditForm] = useState(BARANGAY_EDIT_INITIAL);
@@ -123,10 +173,191 @@ export default function RoutesFaresTab() {
     barangay_name: '',
     distance_km: '',
     tricycle_base_fare: '15',
-    per_km_increase: '2',
     is_highway: true,
     allowed_vehicle_types: ['Bus', 'Minibus', 'Multicab', 'Trycicle'] as string[],
   });
+  const routeTimeRequestRef = useRef(0);
+  const routeEditTimeRequestRef = useRef(0);
+  const routeImageInputRef = useRef<HTMLInputElement | null>(null);
+  const routeEditImageInputRef = useRef<HTMLInputElement | null>(null);
+
+  const uploadVehicleImageFile = async (file: File): Promise<string> => {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const token = String(session?.access_token || '').trim();
+    if (!token) {
+      throw new Error('Session expired. Please login again.');
+    }
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch('/api/admin/uploads/vehicle-image', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: formData,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed to upload vehicle image.');
+    }
+
+    const nextUrl = String(payload?.url || '').trim();
+    if (!nextUrl) {
+      throw new Error('Upload finished but image URL is empty.');
+    }
+    return nextUrl;
+  };
+
+  const softDeleteFareByAdmin = async (input: {
+    target: 'route_fare' | 'barangay_fare';
+    id: string;
+  }) => {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const token = String(session?.access_token || '').trim();
+    if (!token) {
+      throw new Error('Session expired. Please login again.');
+    }
+
+    const response = await fetch('/api/admin/routes-fares', {
+      method: 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        target: input.target,
+        id: input.id,
+      }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed to delete fare.');
+    }
+  };
+
+  const upsertBarangayFareByAdmin = async (input: {
+    barangay_name: string;
+    distance_km: number;
+    tricycle_base_fare: number;
+    is_highway: boolean;
+    allowed_vehicle_types: string[];
+  }) => {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const token = String(session?.access_token || '').trim();
+    if (!token) {
+      throw new Error('Session expired. Please login again.');
+    }
+
+    const response = await fetch('/api/admin/routes-fares', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        action: 'upsert_barangay',
+        ...input,
+      }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed to save barangay fare.');
+    }
+    return payload as { mode?: 'inserted' | 'updated' };
+  };
+
+  const updateBarangayFareByAdmin = async (input: {
+    id: string;
+    barangay_name: string;
+    distance_km: number;
+    tricycle_base_fare: number;
+    is_highway: boolean;
+    allowed_vehicle_types: string[];
+  }) => {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    const token = String(session?.access_token || '').trim();
+    if (!token) {
+      throw new Error('Session expired. Please login again.');
+    }
+
+    const response = await fetch('/api/admin/routes-fares', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        action: 'update_barangay',
+        ...input,
+      }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed to update barangay fare.');
+    }
+  };
+
+  const handleUploadRouteImage = async (
+    file: File | null,
+    target: 'add' | 'edit'
+  ) => {
+    if (!file) return;
+
+    const fileType = String(file.type || '').toLowerCase();
+    if (!fileType.startsWith('image/')) {
+      sileoToast.warning({
+        title: 'Invalid file',
+        description: 'Please select an image file.',
+      });
+      return;
+    }
+
+    const maxBytes = 5 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      sileoToast.warning({
+        title: 'File too large',
+        description: 'Max upload size is 5MB.',
+      });
+      return;
+    }
+
+    if (target === 'add') setRouteImageUploading(true);
+    if (target === 'edit') setRouteEditImageUploading(true);
+
+    try {
+      const uploadedUrl = await uploadVehicleImageFile(file);
+      if (target === 'add') {
+        setRouteForm((prev) => ({ ...prev, vehicle_image_url: uploadedUrl }));
+      } else {
+        setRouteEditForm((prev) => ({ ...prev, vehicle_image_url: uploadedUrl }));
+      }
+      sileoToast.success({ title: 'Vehicle image uploaded' });
+    } catch (error: any) {
+      sileoToast.error({
+        title: 'Upload failed',
+        description: error?.message || 'Unable to upload vehicle image.',
+      });
+    } finally {
+      if (target === 'add') {
+        setRouteImageUploading(false);
+        if (routeImageInputRef.current) routeImageInputRef.current.value = '';
+      }
+      if (target === 'edit') {
+        setRouteEditImageUploading(false);
+        if (routeEditImageInputRef.current) routeEditImageInputRef.current.value = '';
+      }
+    }
+  };
 
   const destinationVehicleMap = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -162,7 +393,7 @@ export default function RoutesFaresTab() {
         supabase
           .from('tbl_route_fares')
           .select(
-            'id, destination_id, origin, destination, distance_km, vehicle_type_id, vehicle_type, regular_fare, discount_rate, is_active, vehicle:tbl_vehicle_types(id, name, image_url)'
+            'id, destination_id, origin, destination, distance_km, vehicle_type_id, vehicle_type, vehicle_image_url, regular_fare, discount_rate, is_active, vehicle:tbl_vehicle_types(id, name, image_url)'
           )
           .eq('is_active', true)
           .order('origin', { ascending: true })
@@ -170,7 +401,7 @@ export default function RoutesFaresTab() {
         supabase
           .from('tbl_barangay_fares')
           .select(
-            'id, barangay_name, distance_km, tricycle_base_fare, per_km_increase, allowed_vehicle_types, is_highway, is_active'
+            'id, barangay_name, distance_km, tricycle_base_fare, allowed_vehicle_types, is_highway, is_active'
           )
           .eq('is_active', true)
           .order('barangay_name', { ascending: true }),
@@ -225,6 +456,94 @@ export default function RoutesFaresTab() {
     void loadLookups();
   }, []);
 
+  useEffect(() => {
+    const destination = destinations.find((d) => d.id === routeForm.destination_id);
+    const vehicleName =
+      vehicleTypes.find((v) => v.id === routeForm.vehicle_type_id)?.name || '';
+    const distance = Number(routeForm.distance_km || 0);
+
+    if (!destination || !vehicleName || !Number.isFinite(distance) || distance <= 0) {
+      setRouteTimeLoading(false);
+      return;
+    }
+
+    const requestId = ++routeTimeRequestRef.current;
+    setRouteTimeLoading(true);
+
+    const timer = window.setTimeout(async () => {
+      const suggestedMinutes = await fetchSuggestedTravelMinutes({
+        origin: destination.origin,
+        destination: destination.destination,
+        vehicleType: vehicleName,
+        distanceKm: distance,
+      });
+      if (routeTimeRequestRef.current !== requestId) return;
+
+      setRouteForm((prev) => {
+        if (
+          prev.destination_id !== destination.id ||
+          prev.vehicle_type_id !== routeForm.vehicle_type_id
+        ) {
+          return prev;
+        }
+        const fallbackMinutes = computeTravelMinutes(distance, vehicleName);
+        return {
+          ...prev,
+          travel_time_minutes: String(suggestedMinutes || fallbackMinutes || ''),
+        };
+      });
+      setRouteTimeLoading(false);
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    destinations,
+    routeForm.destination_id,
+    routeForm.vehicle_type_id,
+    routeForm.distance_km,
+    vehicleTypes,
+  ]);
+
+  useEffect(() => {
+    if (!routeEditingRow) {
+      setRouteEditTimeLoading(false);
+      return;
+    }
+
+    const distance = Number(routeEditForm.distance_km || 0);
+    const vehicleName = routeEditingRow.vehicle?.name || routeEditingRow.vehicle_type;
+    if (!Number.isFinite(distance) || distance <= 0 || !vehicleName.trim()) {
+      setRouteEditTimeLoading(false);
+      return;
+    }
+
+    const requestId = ++routeEditTimeRequestRef.current;
+    setRouteEditTimeLoading(true);
+
+    const timer = window.setTimeout(async () => {
+      const suggestedMinutes = await fetchSuggestedTravelMinutes({
+        origin: routeEditingRow.origin,
+        destination: routeEditingRow.destination,
+        vehicleType: vehicleName,
+        distanceKm: distance,
+      });
+      if (routeEditTimeRequestRef.current !== requestId) return;
+      setRouteEditForm((prev) => ({
+        ...prev,
+        travel_time_minutes: String(
+          suggestedMinutes || computeTravelMinutes(distance, vehicleName) || ''
+        ),
+      }));
+      setRouteEditTimeLoading(false);
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [routeEditingRow, routeEditForm.distance_km]);
+
   const addRouteFare = async () => {
     const destination = destinations.find((d) => d.id === routeForm.destination_id);
     const vehicle = vehicleTypes.find((v) => v.id === routeForm.vehicle_type_id);
@@ -232,6 +551,7 @@ export default function RoutesFaresTab() {
     const travelMinutes = Number(routeForm.travel_time_minutes);
     const fare = Number(routeForm.regular_fare);
     const discount = Number(routeForm.discount_rate || 0.2);
+    const vehicleImageUrl = normalizeImageUrl(routeForm.vehicle_image_url);
     if (!destination || !vehicle) return sileoToast.warning({ title: 'Missing fields', description: 'Select destination and vehicle type.' });
     if (!Number.isFinite(distance) || distance <= 0) return sileoToast.warning({ title: 'Invalid distance', description: 'Distance must be greater than 0 km.' });
     if (!Number.isFinite(travelMinutes) || travelMinutes <= 0) return sileoToast.warning({ title: 'Invalid travel time', description: 'Travel time must be greater than 0 minute.' });
@@ -240,18 +560,40 @@ export default function RoutesFaresTab() {
 
     setRouteSaving(true);
     try {
-      const { error } = await supabase.from('tbl_route_fares').insert({
+      const recordPayload = {
         destination_id: destination.id,
         origin: destination.origin,
         destination: destination.destination,
         distance_km: distance,
         vehicle_type_id: vehicle.id,
         vehicle_type: vehicle.name,
+        vehicle_image_url: vehicleImageUrl || vehicle.image_url || null,
         regular_fare: fare,
         discount_rate: discount,
         is_active: true,
-      });
-      if (error) throw error;
+      };
+
+      const { data: existingRows, error: existingError } = await supabase
+        .from('tbl_route_fares')
+        .select('id')
+        .eq('destination_id', destination.id)
+        .eq('vehicle_type_id', vehicle.id)
+        .limit(1);
+      if (existingError) throw existingError;
+
+      const existingId = String(existingRows?.[0]?.id || '').trim();
+      if (existingId) {
+        const { error: updateError } = await supabase
+          .from('tbl_route_fares')
+          .update(recordPayload)
+          .eq('id', existingId);
+        if (updateError) throw updateError;
+      } else {
+        const { error: insertError } = await supabase
+          .from('tbl_route_fares')
+          .insert(recordPayload);
+        if (insertError) throw insertError;
+      }
       await fetch('/api/public/route-metrics', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -275,8 +617,11 @@ export default function RoutesFaresTab() {
         travel_time_minutes: '',
         regular_fare: '',
         discount_rate: '0.20',
+        vehicle_image_url: '',
       });
-      sileoToast.success({ title: 'Route fare added' });
+      sileoToast.success({
+        title: existingId ? 'Route fare updated' : 'Route fare added',
+      });
       await loadAll();
     } catch (error: any) {
       sileoToast.error({ title: 'Save failed', description: error?.message || 'Unable to add route fare.' });
@@ -289,35 +634,34 @@ export default function RoutesFaresTab() {
     const name = normalizeName(barangayForm.barangay_name);
     const distance = Number(barangayForm.distance_km);
     const base = Number(barangayForm.tricycle_base_fare);
-    const perKm = Number(barangayForm.per_km_increase);
     if (!name) return sileoToast.warning({ title: 'Missing barangay', description: 'Please input barangay name.' });
     if (!Number.isFinite(distance) || distance < 0) return sileoToast.warning({ title: 'Invalid distance', description: 'Distance must be 0 or higher.' });
     if (!Number.isFinite(base) || base < 0) return sileoToast.warning({ title: 'Invalid base fare', description: 'Base fare must be 0 or higher.' });
-    if (!Number.isFinite(perKm) || perKm < 0) return sileoToast.warning({ title: 'Invalid per-km fare', description: 'Per-km increase must be 0 or higher.' });
 
     setBarangaySaving(true);
     try {
-      const { error } = await supabase.from('tbl_barangay_fares').insert({
+      const payload = {
         barangay_name: name,
         distance_km: distance,
         tricycle_base_fare: base,
-        per_km_increase: perKm,
         is_highway: barangayForm.is_highway,
         allowed_vehicle_types: barangayForm.is_highway
           ? barangayForm.allowed_vehicle_types
           : [],
         is_active: true,
-      });
-      if (error) throw error;
+      };
+
+      const result = await upsertBarangayFareByAdmin(payload);
       setBarangayForm({
         barangay_name: '',
         distance_km: '',
         tricycle_base_fare: '15',
-        per_km_increase: '2',
         is_highway: true,
         allowed_vehicle_types: ['Bus', 'Minibus', 'Multicab', 'Trycicle'],
       });
-      sileoToast.success({ title: 'Barangay fare added' });
+      sileoToast.success({
+        title: result.mode === 'updated' ? 'Barangay fare updated' : 'Barangay fare added',
+      });
       await loadAll();
     } catch (error: any) {
       sileoToast.error({
@@ -341,6 +685,7 @@ export default function RoutesFaresTab() {
           : '',
       regular_fare: String(row.regular_fare || ''),
       discount_rate: String(row.discount_rate ?? 0.2),
+      vehicle_image_url: row.vehicle_image_url || row.vehicle?.image_url || '',
     });
   };
 
@@ -357,6 +702,7 @@ export default function RoutesFaresTab() {
     const travelMinutes = Number(routeEditForm.travel_time_minutes);
     const fare = Number(routeEditForm.regular_fare);
     const discount = Number(routeEditForm.discount_rate || 0.2);
+    const vehicleImageUrl = normalizeImageUrl(routeEditForm.vehicle_image_url);
 
     if (!Number.isFinite(distance) || distance <= 0) {
       sileoToast.warning({
@@ -393,6 +739,7 @@ export default function RoutesFaresTab() {
         .from('tbl_route_fares')
         .update({
           distance_km: distance,
+          vehicle_image_url: vehicleImageUrl || null,
           regular_fare: fare,
           discount_rate: discount,
         })
@@ -418,14 +765,15 @@ export default function RoutesFaresTab() {
 
       setRouteRows((prev) =>
         prev.map((item) =>
-          item.id === routeEditingRow.id
-            ? {
-                ...item,
-                distance_km: distance,
-                regular_fare: fare,
-                discount_rate: discount,
-              }
-            : item
+              item.id === routeEditingRow.id
+                ? {
+                    ...item,
+                    distance_km: distance,
+                    vehicle_image_url: vehicleImageUrl || null,
+                    regular_fare: fare,
+                    discount_rate: discount,
+                  }
+                : item
         )
       );
 
@@ -448,7 +796,6 @@ export default function RoutesFaresTab() {
       barangay_name: row.barangay_name,
       distance_km: String(row.distance_km ?? ''),
       tricycle_base_fare: String(row.tricycle_base_fare ?? '15'),
-      per_km_increase: String(row.per_km_increase ?? '2'),
       is_highway: !!row.is_highway,
       allowed_vehicle_types: row.is_highway
         ? ((row.allowed_vehicle_types || []).filter((item) =>
@@ -470,7 +817,6 @@ export default function RoutesFaresTab() {
     const name = normalizeName(barangayEditForm.barangay_name);
     const distance = Number(barangayEditForm.distance_km);
     const base = Number(barangayEditForm.tricycle_base_fare);
-    const perKm = Number(barangayEditForm.per_km_increase);
 
     if (!name) {
       sileoToast.warning({
@@ -493,30 +839,18 @@ export default function RoutesFaresTab() {
       });
       return;
     }
-    if (!Number.isFinite(perKm) || perKm < 0) {
-      sileoToast.warning({
-        title: 'Invalid per-km fare',
-        description: 'Per-km increase must be 0 or higher.',
-      });
-      return;
-    }
-
     setBarangayUpdating(true);
     try {
-      const { error } = await supabase
-        .from('tbl_barangay_fares')
-        .update({
-          barangay_name: name,
-          distance_km: distance,
-          tricycle_base_fare: base,
-          per_km_increase: perKm,
-          is_highway: barangayEditForm.is_highway,
-          allowed_vehicle_types: barangayEditForm.is_highway
-            ? barangayEditForm.allowed_vehicle_types
-            : [],
-        })
-        .eq('id', barangayEditingRow.id);
-      if (error) throw error;
+      await updateBarangayFareByAdmin({
+        id: barangayEditingRow.id,
+        barangay_name: name,
+        distance_km: distance,
+        tricycle_base_fare: base,
+        is_highway: barangayEditForm.is_highway,
+        allowed_vehicle_types: barangayEditForm.is_highway
+          ? barangayEditForm.allowed_vehicle_types
+          : [],
+      });
 
       setBarangayRows((prev) =>
         prev.map((item) =>
@@ -526,7 +860,6 @@ export default function RoutesFaresTab() {
                 barangay_name: name,
                 distance_km: distance,
                 tricycle_base_fare: base,
-                per_km_increase: perKm,
                 is_highway: barangayEditForm.is_highway,
                 allowed_vehicle_types: barangayEditForm.is_highway
                   ? barangayEditForm.allowed_vehicle_types
@@ -540,9 +873,13 @@ export default function RoutesFaresTab() {
       setBarangayEditingRow(null);
       setBarangayEditForm(BARANGAY_EDIT_INITIAL);
     } catch (error: any) {
+      const message = String(error?.message || '');
       sileoToast.error({
         title: 'Update failed',
-        description: error?.message || 'Unable to update barangay fare.',
+        description:
+          message === 'barangay_name_exists'
+            ? 'Barangay name already exists. Please use a different name.'
+            : error?.message || 'Unable to update barangay fare.',
       });
     } finally {
       setBarangayUpdating(false);
@@ -552,8 +889,7 @@ export default function RoutesFaresTab() {
   const removeRouteFare = async (row: RouteFareRow) => {
     setRouteDeletingId(row.id);
     try {
-      const { error } = await supabase.from('tbl_route_fares').update({ is_active: false }).eq('id', row.id);
-      if (error) throw error;
+      await softDeleteFareByAdmin({ target: 'route_fare', id: row.id });
       setRouteRows((prev) => prev.filter((item) => item.id !== row.id));
       if (routeEditingRow?.id === row.id) {
         setRouteEditingRow(null);
@@ -570,8 +906,7 @@ export default function RoutesFaresTab() {
   const removeBarangayFare = async (row: BarangayFareRow) => {
     setBarangayDeletingId(row.id);
     try {
-      const { error } = await supabase.from('tbl_barangay_fares').update({ is_active: false }).eq('id', row.id);
-      if (error) throw error;
+      await softDeleteFareByAdmin({ target: 'barangay_fare', id: row.id });
       setBarangayRows((prev) => prev.filter((item) => item.id !== row.id));
       if (barangayEditingRow?.id === row.id) {
         setBarangayEditingRow(null);
@@ -609,6 +944,7 @@ export default function RoutesFaresTab() {
                   vehicle_type_id: '',
                   distance_km: distance == null ? '' : String(distance),
                   travel_time_minutes: '',
+                  vehicle_image_url: '',
                 };
               });
             }}
@@ -626,7 +962,8 @@ export default function RoutesFaresTab() {
             value={routeForm.vehicle_type_id}
             onChange={(e) => {
               const nextVehicleId = e.target.value;
-              const selectedVehicle = vehicleTypes.find((v) => v.id === nextVehicleId)?.name || '';
+              const selectedVehicleRow = vehicleTypes.find((v) => v.id === nextVehicleId) || null;
+              const selectedVehicle = selectedVehicleRow?.name || '';
               setRouteForm((prev) => {
                 const distance = Number(prev.distance_km || 0);
                 const computedMinutes =
@@ -635,6 +972,7 @@ export default function RoutesFaresTab() {
                   ...prev,
                   vehicle_type_id: nextVehicleId,
                   travel_time_minutes: computedMinutes > 0 ? String(computedMinutes) : prev.travel_time_minutes,
+                  vehicle_image_url: selectedVehicleRow?.image_url || '',
                 };
               });
             }}
@@ -647,6 +985,55 @@ export default function RoutesFaresTab() {
               </option>
             ))}
           </select>
+          <div className="space-y-2">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-theme">
+              Vehicle Image
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={routeImageInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+                className="hidden"
+                onChange={(e) =>
+                  void handleUploadRouteImage(e.target.files?.[0] || null, 'add')
+                }
+                disabled={routeImageUploading || routeSaving}
+              />
+              <button
+                type="button"
+                onClick={() => routeImageInputRef.current?.click()}
+                disabled={routeImageUploading || routeSaving}
+                className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                style={{
+                  color: 'var(--primary)',
+                  background: 'var(--tg-subtle)',
+                  border: '1px solid var(--tg-border-primary)',
+                  opacity: routeImageUploading || routeSaving ? 0.6 : 1,
+                }}
+              >
+                {routeImageUploading ? 'Uploading...' : 'Upload Image'}
+              </button>
+              {normalizeImageUrl(routeForm.vehicle_image_url) && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setRouteForm((prev) => ({ ...prev, vehicle_image_url: '' }))
+                  }
+                  disabled={routeImageUploading || routeSaving}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                  style={{
+                    color: '#ef4444',
+                    background: 'var(--tg-subtle)',
+                    border: '1px solid var(--tg-border)',
+                    opacity: routeImageUploading || routeSaving ? 0.6 : 1,
+                  }}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
           <input
             className="input-dark"
             placeholder="Distance (km)"
@@ -697,12 +1084,32 @@ export default function RoutesFaresTab() {
             value={routeForm.discount_rate}
             onChange={(e) => setRouteForm((prev) => ({ ...prev, discount_rate: e.target.value }))}
           />
-          <button className="btn-primary md:col-span-2 inline-flex items-center justify-center gap-2" onClick={() => void addRouteFare()} disabled={routeSaving}>
+          <button
+            className="btn-primary md:col-span-2 inline-flex items-center justify-center gap-2"
+            onClick={() => void addRouteFare()}
+            disabled={routeSaving || routeImageUploading}
+          >
             <Plus size={14} /> {routeSaving ? 'Saving...' : 'Add Route Fare'}
           </button>
         </div>
+        {normalizeImageUrl(routeForm.vehicle_image_url) && (
+          <div className="mt-3">
+            <p className="text-xs text-muted-theme mb-1.5">Image preview</p>
+            <Image
+              src={resolveVehicleImageUrl(routeForm.vehicle_image_url)}
+              alt="Vehicle preview"
+              width={224}
+              height={160}
+              className="w-28 h-20 rounded-lg object-cover border"
+              style={{ borderColor: 'var(--tg-border)' }}
+              sizes="112px"
+            />
+          </div>
+        )}
         <p className="text-xs text-muted-theme mt-2">
-          Travel time is auto-suggested from distance + vehicle speed, but you can manually adjust it.
+          {routeTimeLoading
+            ? 'Auto-calculating travel time for selected route and vehicle...'
+            : 'Travel time is auto-calculated by route + vehicle, but you can manually adjust it.'}
         </p>
       </div>
 
@@ -743,8 +1150,17 @@ export default function RoutesFaresTab() {
                         <tr key={v.id} style={{ borderBottom: '1px solid var(--tg-border)' }} className="hover:bg-[var(--tg-subtle)] transition-colors">
                           <td className="p-4">
                             <div className="flex items-center gap-2">
-                              {v.vehicle?.image_url ? (
-                                <img src={v.vehicle.image_url} alt={v.vehicle.name} className="w-8 h-8 rounded-lg object-cover" />
+                              {(v.vehicle_image_url || v.vehicle?.image_url) ? (
+                                <Image
+                                  src={resolveVehicleImageUrl(
+                                    v.vehicle_image_url || v.vehicle?.image_url || ''
+                                  )}
+                                  alt={v.vehicle?.name || v.vehicle_type}
+                                  width={32}
+                                  height={32}
+                                  className="w-8 h-8 rounded-lg object-cover"
+                                  sizes="32px"
+                                />
                               ) : (
                                 <Bus size={14} style={{ color: 'var(--primary)' }} />
                               )}
@@ -803,13 +1219,12 @@ export default function RoutesFaresTab() {
       <div className="card-glow rounded-2xl p-4 md:p-5">
         <h2 className="text-theme text-base font-semibold mb-3">Add Barangay Fare Rule</h2>
         <p className="text-xs text-muted-theme mb-3">
-          Tricycle formula: <span className="font-semibold text-theme">base fare + (distance * per-km increase)</span>. Default per-km increase is P2.
+          Tricycle fare uses a fixed base fare. Distance and travel time shown to commuters are auto-computed from Google Maps.
         </p>
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
           <input className="input-dark" placeholder="Barangay name" value={barangayForm.barangay_name} onChange={(e) => setBarangayForm((prev) => ({ ...prev, barangay_name: e.target.value }))} />
           <input className="input-dark" placeholder="Distance km" type="number" min="0" step="0.1" value={barangayForm.distance_km} onChange={(e) => setBarangayForm((prev) => ({ ...prev, distance_km: e.target.value }))} />
           <input className="input-dark" placeholder="Base fare" type="number" min="0" step="0.01" value={barangayForm.tricycle_base_fare} onChange={(e) => setBarangayForm((prev) => ({ ...prev, tricycle_base_fare: e.target.value }))} />
-          <input className="input-dark" placeholder="Per-km increase" type="number" min="0" step="0.01" value={barangayForm.per_km_increase} onChange={(e) => setBarangayForm((prev) => ({ ...prev, per_km_increase: e.target.value }))} />
           <button className="btn-primary inline-flex items-center justify-center gap-2" onClick={() => void addBarangayFare()} disabled={barangaySaving}>
             <Plus size={14} /> {barangaySaving ? 'Saving...' : 'Add Barangay'}
           </button>
@@ -868,12 +1283,11 @@ export default function RoutesFaresTab() {
               </tr>
             ) : (
               barangayRows.map((row) => {
-                const computedFare = row.tricycle_base_fare + row.distance_km * row.per_km_increase;
                 return (
                   <tr key={row.id} style={{ borderBottom: '1px solid var(--tg-border)' }}>
                     <td className="p-4 text-theme font-semibold">{row.barangay_name}</td>
                     <td className="p-4 text-center text-theme">{row.distance_km} km</td>
-                    <td className="p-4 text-center text-theme">{formatMoney(computedFare)}</td>
+                    <td className="p-4 text-center text-theme">{formatMoney(row.tricycle_base_fare)}</td>
                     <td className="p-4 text-center text-theme">
                       {row.is_highway ? (row.allowed_vehicle_types || []).join(', ') || '--' : '--'}
                     </td>
@@ -990,6 +1404,11 @@ export default function RoutesFaresTab() {
                     }))
                   }
                 />
+                {routeEditTimeLoading && (
+                  <p className="text-[11px] text-muted-theme mt-1">
+                    Updating suggested travel time...
+                  </p>
+                )}
               </label>
               <label className="block">
                 <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
@@ -1028,7 +1447,79 @@ export default function RoutesFaresTab() {
                   }
                 />
               </label>
+              <label className="block md:col-span-2">
+                <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+                  Vehicle Image
+                </span>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <input
+                    ref={routeEditImageInputRef}
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml"
+                    className="hidden"
+                    onChange={(e) =>
+                      void handleUploadRouteImage(
+                        e.target.files?.[0] || null,
+                        'edit'
+                      )
+                    }
+                    disabled={routeEditImageUploading || routeUpdating}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => routeEditImageInputRef.current?.click()}
+                    disabled={routeEditImageUploading || routeUpdating}
+                    className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                    style={{
+                      color: 'var(--primary)',
+                      background: 'var(--tg-subtle)',
+                      border: '1px solid var(--tg-border-primary)',
+                      opacity:
+                        routeEditImageUploading || routeUpdating ? 0.6 : 1,
+                    }}
+                  >
+                    {routeEditImageUploading ? 'Uploading...' : 'Upload Image'}
+                  </button>
+                  {normalizeImageUrl(routeEditForm.vehicle_image_url) && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setRouteEditForm((prev) => ({
+                          ...prev,
+                          vehicle_image_url: '',
+                        }))
+                      }
+                      disabled={routeEditImageUploading || routeUpdating}
+                      className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                      style={{
+                        color: '#ef4444',
+                        background: 'var(--tg-subtle)',
+                        border: '1px solid var(--tg-border)',
+                        opacity:
+                          routeEditImageUploading || routeUpdating ? 0.6 : 1,
+                      }}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </label>
             </div>
+
+            {normalizeImageUrl(routeEditForm.vehicle_image_url) && (
+              <div className="mt-3">
+                <p className="text-xs text-muted-theme mb-1.5">Image preview</p>
+                <Image
+                  src={resolveVehicleImageUrl(routeEditForm.vehicle_image_url)}
+                  alt="Route vehicle preview"
+                  width={256}
+                  height={160}
+                  className="w-32 h-20 rounded-lg object-cover border"
+                  style={{ borderColor: 'var(--tg-border)' }}
+                  sizes="128px"
+                />
+              </div>
+            )}
 
             <div className="flex items-center justify-end gap-2 mt-5">
               <button
@@ -1045,11 +1536,19 @@ export default function RoutesFaresTab() {
               </button>
               <button
                 onClick={() => void saveRouteEdit()}
-                disabled={routeUpdating}
+                disabled={routeUpdating || routeEditImageUploading}
                 className="btn-primary text-sm"
-                style={routeUpdating ? { opacity: 0.7, cursor: 'not-allowed' } : {}}
+                style={
+                  routeUpdating || routeEditImageUploading
+                    ? { opacity: 0.7, cursor: 'not-allowed' }
+                    : {}
+                }
               >
-                {routeUpdating ? 'Saving...' : 'Save Changes'}
+                {routeEditImageUploading
+                  ? 'Uploading image...'
+                  : routeUpdating
+                    ? 'Saving...'
+                    : 'Save Changes'}
               </button>
             </div>
           </div>
@@ -1140,24 +1639,6 @@ export default function RoutesFaresTab() {
                     />
                   </label>
 
-                  <label className="block md:col-span-2">
-                    <span className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
-                      Per-km Increase
-                    </span>
-                    <input
-                      className="input-dark"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={barangayEditForm.per_km_increase}
-                      onChange={(e) =>
-                        setBarangayEditForm((prev) => ({
-                          ...prev,
-                          per_km_increase: e.target.value,
-                        }))
-                      }
-                    />
-                  </label>
                 </div>
 
                 <div className="mt-4 space-y-3">

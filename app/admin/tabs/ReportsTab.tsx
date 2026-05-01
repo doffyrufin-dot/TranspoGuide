@@ -305,7 +305,7 @@ export default function ReportsTab({ accessToken }: Props) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-6 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
         <div className="card-glow p-4 rounded-2xl">
           <p className="text-xs text-muted-theme font-semibold uppercase tracking-wider">
             Bookings
@@ -328,14 +328,6 @@ export default function ReportsTab({ accessToken }: Props) {
           </p>
           <p className="text-2xl font-extrabold text-theme mt-1">
             {loading ? '...' : reports?.summary.applications || 0}
-          </p>
-        </div>
-        <div className="card-glow p-4 rounded-2xl">
-          <p className="text-xs text-muted-theme font-semibold uppercase tracking-wider">
-            Total Revenue
-          </p>
-          <p className="text-2xl font-extrabold text-theme mt-1">
-            {loading ? '...' : formatPeso(reports?.summary.total_revenue || 0)}
           </p>
         </div>
         <div className="card-glow p-4 rounded-2xl">

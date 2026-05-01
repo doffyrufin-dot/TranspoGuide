@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { releaseReservationLocks } from '@/lib/db/reservations';
 
 const PAYMONGO_SECRET_KEY = process.env.PAYMONGO_SECRET_KEY || '';
 
@@ -139,7 +140,7 @@ export async function POST(req: NextRequest) {
     const { data: reservationRows, error: reservationError } = await supabase
       .from('tbl_reservations')
       .select(
-        'id, status, full_name, passenger_email, contact_number, route, seat_labels, amount_due, operator_user_id, queue_id'
+        'id, status, full_name, passenger_email, contact_number, route, seat_labels, amount_due, operator_user_id, queue_id, lock_expires_at'
       )
       .eq('id', reservationId)
       .limit(1);
@@ -163,6 +164,7 @@ export async function POST(req: NextRequest) {
           amount_due?: number | null;
           operator_user_id?: string | null;
           queue_id?: string | null;
+          lock_expires_at?: string | null;
         }
       | null;
 
@@ -176,6 +178,54 @@ export async function POST(req: NextRequest) {
         {
           error:
             'Reservation is not ready for downpayment yet. Please wait for operator confirmation.',
+        },
+        { status: 409 }
+      );
+    }
+
+    const nowMs = Date.now();
+    const lockExpiresAtMs = reservation.lock_expires_at
+      ? new Date(reservation.lock_expires_at).getTime()
+      : 0;
+    if (lockExpiresAtMs && lockExpiresAtMs <= nowMs) {
+      await releaseReservationLocks(reservationId);
+      return NextResponse.json(
+        {
+          error:
+            'Payment window expired for this reservation. Please reserve your seat again.',
+        },
+        { status: 409 }
+      );
+    }
+
+    const { data: lockRows, error: lockError } = await supabase
+      .from('tbl_seat_locks')
+      .select('id, status, expires_at')
+      .eq('reservation_id', reservationId)
+      .in('status', ['locked', 'reserved']);
+
+    if (lockError) {
+      return NextResponse.json(
+        { error: lockError.message || 'Failed to validate reservation lock.' },
+        { status: 500 }
+      );
+    }
+
+    const hasActiveLock = (lockRows || []).some((row: any) => {
+      const status = String(row?.status || '').toLowerCase();
+      if (status === 'reserved') return true;
+      if (status !== 'locked') return false;
+      const expiresAt = String(row?.expires_at || '').trim();
+      const expiresAtMs = expiresAt ? new Date(expiresAt).getTime() : 0;
+      return expiresAtMs > nowMs;
+    });
+
+    if (!hasActiveLock) {
+      await releaseReservationLocks(reservationId);
+      return NextResponse.json(
+        {
+          error:
+            'Payment window expired for this reservation. Please reserve your seat again.',
         },
         { status: 409 }
       );

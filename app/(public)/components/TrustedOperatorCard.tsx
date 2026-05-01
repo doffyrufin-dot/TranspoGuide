@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import Image from 'next/image';
 import { FaStar } from 'react-icons/fa';
 
 type OperatorRecentComment = {
@@ -28,7 +29,7 @@ type TrustedOperatorCardProps = {
   onToggleComments?: () => void;
 };
 
-const COMMENTS_PER_PAGE = 3;
+const COMMENTS_PER_PAGE = 2;
 
 const getInitials = (name: string) => {
   const parts = String(name || '')
@@ -88,14 +89,14 @@ export default function TrustedOperatorCard({
             }}
           >
             {operator.operator_avatar_url ? (
-              <>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={operator.operator_avatar_url}
-                  alt={operator.operator_name}
-                  className="w-full h-full object-cover"
-                />
-              </>
+              <Image
+                src={operator.operator_avatar_url}
+                alt={operator.operator_name}
+                width={44}
+                height={44}
+                className="w-full h-full object-cover"
+                sizes="44px"
+              />
             ) : (
               getInitials(operator.operator_name)
             )}

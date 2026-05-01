@@ -1,10 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
-const activeQueueStatuses = ['boarding', 'queued'];
-const pickupEligibleStatuses = ['confirmed', 'paid'];
+const activeQueueStatuses = ['departed', 'boarding', 'queued'];
+const pickupEligibleStatuses = ['confirmed', 'paid', 'departed'];
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 50;
+const RESERVATION_INDEX_LIMIT = 3000;
+const PASSENGER_VISIBLE_WINDOW_MINUTES = Number(
+  process.env.OPERATOR_PASSENGER_VISIBLE_WINDOW_MINUTES || '60'
+);
+
+type ReservationIndexRow = {
+  id: string;
+  full_name: string | null;
+  contact_number: string | null;
+  pickup_location: string | null;
+  route: string | null;
+  seat_count: number | null;
+  amount_due: number | null;
+  status: string | null;
+  created_at: string | null;
+  paid_at: string | null;
+  queue_id: string | null;
+  trip_key: string | null;
+};
+
+const toTimestamp = (value?: string | null) => {
+  if (!value) return 0;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+};
 
 const toTimeLabel = (value?: string | null) => {
   if (!value) return '';
@@ -36,6 +61,18 @@ const toTitleRoute = (value?: string | null) => {
     .split(' ')
     .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
     .join(' ');
+};
+
+const splitRouteParts = (value?: string | null) => {
+  const normalized = normalizeRoute(value)
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  if (!normalized) return [] as string[];
+
+  return normalized
+    .split(/\bto\b|->|—|-/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
 };
 
 export async function GET(req: NextRequest) {
@@ -93,9 +130,17 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const queueStatusRank = (status?: string | null) => {
+      const normalized = String(status || '').toLowerCase();
+      if (normalized === 'departed') return 0;
+      if (normalized === 'boarding') return 1;
+      if (normalized === 'queued') return 2;
+      return 3;
+    };
+
     const prioritizedQueues = [...(queueRows || [])].sort((a, b) => {
-      const rankA = a.status === 'boarding' ? 0 : 1;
-      const rankB = b.status === 'boarding' ? 0 : 1;
+      const rankA = queueStatusRank(a.status);
+      const rankB = queueStatusRank(b.status);
       if (rankA !== rankB) return rankA - rankB;
 
       const timeA = new Date(a.updated_at || a.created_at || 0).getTime();
@@ -157,48 +202,114 @@ export async function GET(req: NextRequest) {
       return {
         queue,
         tripKeyCandidates,
+        tripKeySet: new Set(tripKeyCandidates.map((value) => String(value || '').trim())),
         activeTripKey: tripKeyCandidates[0] || null,
       };
     });
 
-    const applyReservationFilters = (
-      query: any,
+    const { data: reservationIndexRows, error: reservationIndexError } =
+      await serviceClient
+        .from('tbl_reservations')
+        .select(
+          'id, full_name, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at, queue_id, trip_key'
+        )
+        .eq('operator_user_id', user.id)
+        .in('status', pickupEligibleStatuses)
+        .order('updated_at', { ascending: false })
+        .limit(RESERVATION_INDEX_LIMIT);
+
+    if (reservationIndexError) {
+      return NextResponse.json(
+        { error: reservationIndexError.message || 'Failed to load passengers.' },
+        { status: 500 }
+      );
+    }
+
+    const visibilityCutoffMs =
+      Date.now() - PASSENGER_VISIBLE_WINDOW_MINUTES * 60 * 1000;
+    const recentReservationRows = ((reservationIndexRows || []) as ReservationIndexRow[])
+      .filter((row) => {
+        const paidAtMs = toTimestamp(row.paid_at);
+        const createdAtMs = toTimestamp(row.created_at);
+        const effectiveMs = paidAtMs || createdAtMs;
+        return effectiveMs >= visibilityCutoffMs;
+      });
+
+    const routeMatchesCandidate = (
+      rowRoute: string | null | undefined,
+      candidateRoute: string | null | undefined
+    ) => {
+      const left = normalizeRoute(rowRoute).toLowerCase();
+      const right = normalizeRoute(candidateRoute).toLowerCase();
+      if (!left || !right) return false;
+      if (left === right) return true;
+      if (left.includes(right) || right.includes(left)) return true;
+
+      const leftParts = splitRouteParts(left);
+      const rightParts = splitRouteParts(right);
+      const leftLast = leftParts[leftParts.length - 1] || '';
+      const rightLast = rightParts[rightParts.length - 1] || '';
+
+      if (leftLast && rightLast && leftLast === rightLast) return true;
+      if (leftLast && right && (leftLast === right || right.includes(leftLast))) {
+        return true;
+      }
+      if (rightLast && left && (rightLast === left || left.includes(rightLast))) {
+        return true;
+      }
+
+      return false;
+    };
+
+    const rowMatchesCandidate = (
+      row: ReservationIndexRow,
       candidate: (typeof queueCandidates)[number],
       options?: { skipTripKey?: boolean }
     ) => {
-      let next = query
-        .eq('operator_user_id', user.id)
-        .eq('queue_id', candidate.queue.id)
-        .in('status', pickupEligibleStatuses);
+      const rowQueueId = String(row.queue_id || '').trim();
+      const candidateQueueId = String(candidate.queue.id || '').trim();
+      if (rowQueueId && candidateQueueId && rowQueueId === candidateQueueId) {
+        return true;
+      }
 
-      if (!options?.skipTripKey) {
-        if (candidate.tripKeyCandidates.length === 1) {
-          next = next.eq('trip_key', candidate.tripKeyCandidates[0]);
-        } else if (candidate.tripKeyCandidates.length > 1) {
-          next = next.in('trip_key', candidate.tripKeyCandidates);
+      const rowTripKey = String(row.trip_key || '').trim();
+      if (!options?.skipTripKey && rowTripKey && candidate.tripKeyCandidates.length > 0) {
+        if (candidate.tripKeySet.has(rowTripKey)) {
+          return true;
         }
       }
-      return next;
+
+      return routeMatchesCandidate(row.route, candidate.queue.route);
+    };
+
+    const countCandidateReservations = (
+      candidate: (typeof queueCandidates)[number],
+      options?: { skipTripKey?: boolean }
+    ) => {
+      let count = 0;
+      for (const row of recentReservationRows) {
+        if (rowMatchesCandidate(row, candidate, options)) {
+          count += 1;
+        }
+      }
+      return count;
+    };
+
+    const filterCandidateReservations = (
+      candidate: (typeof queueCandidates)[number],
+      options?: { skipTripKey?: boolean }
+    ) => {
+      return recentReservationRows.filter((row) =>
+        rowMatchesCandidate(row, candidate, options)
+      );
     };
 
     let selectedCandidate = queueCandidates[0];
     let preloadedTotal = 0;
     let tripKeyFilterSkipped = false;
+
     for (const candidate of queueCandidates) {
-      const { count, error } = await applyReservationFilters(
-        serviceClient.from('tbl_reservations').select('id', {
-          count: 'exact',
-          head: true,
-        }),
-        candidate
-      );
-      if (error) {
-        return NextResponse.json(
-          { error: error.message || 'Failed to load passengers.' },
-          { status: 500 }
-        );
-      }
-      const candidateTotal = Number(count || 0);
+      const candidateTotal = countCandidateReservations(candidate);
       if (candidateTotal > 0) {
         selectedCandidate = candidate;
         preloadedTotal = candidateTotal;
@@ -210,21 +321,9 @@ export async function GET(req: NextRequest) {
     // This prevents blank Passenger tab when route text casing differs in trip_key.
     if (preloadedTotal === 0) {
       for (const candidate of queueCandidates) {
-        const { count, error } = await applyReservationFilters(
-          serviceClient.from('tbl_reservations').select('id', {
-            count: 'exact',
-            head: true,
-          }),
-          candidate,
-          { skipTripKey: true }
-        );
-        if (error) {
-          return NextResponse.json(
-            { error: error.message || 'Failed to load passengers.' },
-            { status: 500 }
-          );
-        }
-        const candidateTotal = Number(count || 0);
+        const candidateTotal = countCandidateReservations(candidate, {
+          skipTripKey: true,
+        });
         if (candidateTotal > 0) {
           selectedCandidate = candidate;
           preloadedTotal = candidateTotal;
@@ -238,53 +337,22 @@ export async function GET(req: NextRequest) {
     const activeTripKey = tripKeyFilterSkipped
       ? null
       : selectedCandidate.activeTripKey;
+    const filteredRows = filterCandidateReservations(selectedCandidate, {
+      skipTripKey: tripKeyFilterSkipped,
+    }).sort(
+      (a, b) => toTimestamp(b.created_at) - toTimestamp(a.created_at)
+    );
 
-    const fetchPassengerPage = async (page: number) => {
-      const from = (page - 1) * pageSize;
-      const to = from + pageSize - 1;
-      const query = applyReservationFilters(
-        serviceClient
-          .from('tbl_reservations')
-        .select(
-          'id, full_name, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at',
-          { count: 'exact' }
-        ),
-        selectedCandidate,
-        { skipTripKey: tripKeyFilterSkipped }
-      );
-
-      return query
-        .order('created_at', { ascending: false })
-        .range(from, to);
-    };
-
-    let page = requestedPage;
-    const firstPageResult = await fetchPassengerPage(page);
-    let reservationRows = firstPageResult.data;
-    let reservationError = firstPageResult.error;
-
-    if (reservationError) {
-      return NextResponse.json(
-        { error: reservationError.message || 'Failed to load passengers.' },
-        { status: 500 }
-      );
-    }
-
-    const total = Math.max(preloadedTotal, Number(firstPageResult.count || 0));
+    const total = Math.max(0, filteredRows.length);
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    let page = requestedPage;
 
-    if (total > 0 && page > totalPages) {
+    if (page > totalPages) {
       page = totalPages;
-      const retry = await fetchPassengerPage(page);
-      reservationRows = retry.data;
-      reservationError = retry.error;
-      if (reservationError) {
-        return NextResponse.json(
-          { error: reservationError.message || 'Failed to load passengers.' },
-          { status: 500 }
-        );
-      }
     }
+    const from = Math.max(0, (page - 1) * pageSize);
+    const to = from + pageSize;
+    const reservationRows = filteredRows.slice(from, to);
 
     return NextResponse.json({
       queue: {

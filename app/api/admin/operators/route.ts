@@ -1,55 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-
-const getAdminClient = async (req: NextRequest) => {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
-    throw new Error('server_env_missing');
-  }
-
-  const authHeader = req.headers.get('authorization') || '';
-  const token = authHeader.startsWith('Bearer ')
-    ? authHeader.slice(7).trim()
-    : '';
-  if (!token) throw new Error('missing_auth_token');
-
-  const authClient = createClient(supabaseUrl, anonKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-  const {
-    data: { user },
-    error: userError,
-  } = await authClient.auth.getUser(token);
-  if (userError || !user) throw new Error('unauthorized');
-
-  const serviceClient = createClient(supabaseUrl, serviceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-  const { data: roleRows, error: roleError } = await serviceClient
-    .from('tbl_users')
-    .select('role')
-    .eq('user_id', user.id)
-    .limit(1);
-  if (roleError) throw new Error(roleError.message || 'Failed to verify role.');
-  const role = (roleRows?.[0]?.role || '').toLowerCase();
-  if (role !== 'admin') throw new Error('forbidden');
-
-  return serviceClient;
-};
+import { requireAdminServiceClient } from '@/lib/server/admin-auth';
 
 const toStatus = (message: string) => {
   if (message === 'missing_auth_token' || message === 'unauthorized') return 401;
   if (message === 'forbidden') return 403;
   if (message === 'server_env_missing') return 500;
+  if (message === 'not_found') return 404;
   return 400;
 };
 
 export async function GET(req: NextRequest) {
   try {
-    const supabase = await getAdminClient(req);
+    const { serviceClient: supabase } = await requireAdminServiceClient(req);
 
     const { data: appRows, error: appError } = await supabase
       .from('tbl_operator_applications')
@@ -82,9 +44,107 @@ export async function GET(req: NextRequest) {
       approved_at: row.created_at || null,
     }));
 
-    return NextResponse.json({ operators });
+    return NextResponse.json(
+      { operators },
+      {
+        headers: {
+          'Cache-Control': 'private, max-age=20, stale-while-revalidate=40',
+        },
+      }
+    );
   } catch (error: any) {
     const message = error?.message || 'Failed to load approved operators.';
+    return NextResponse.json({ error: message }, { status: toStatus(message) });
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const { serviceClient: supabase } = await requireAdminServiceClient(req);
+    const payload = (await req.json().catch(() => ({}))) as {
+      applicationId?: string;
+      reason?: string;
+    };
+
+    const applicationId = String(payload.applicationId || '').trim();
+    const reason = String(payload.reason || '').trim();
+
+    if (!applicationId) {
+      throw new Error('application_id_required');
+    }
+
+    const { data: rows, error: readError } = await supabase
+      .from('tbl_operator_applications')
+      .select('id, user_id, status, admin_notes')
+      .eq('id', applicationId)
+      .limit(1);
+
+    if (readError) {
+      throw new Error(readError.message || 'Failed to load operator record.');
+    }
+
+    const row = rows?.[0] as
+      | {
+          id?: string;
+          user_id?: string | null;
+          status?: string | null;
+          admin_notes?: string | null;
+        }
+      | undefined;
+    if (!row?.id) {
+      throw new Error('not_found');
+    }
+
+    const normalizedStatus = String(row.status || '')
+      .trim()
+      .toLowerCase();
+
+    if (normalizedStatus === 'rejected') {
+      return NextResponse.json({
+        success: true,
+        alreadyRemoved: true,
+      });
+    }
+
+    const noteLine = `Soft deleted by admin (${new Date().toISOString()})${
+      reason ? `: ${reason}` : ''
+    }`;
+    const mergedNotes = [String(row.admin_notes || '').trim(), noteLine]
+      .filter(Boolean)
+      .join('\n');
+
+    const { error: updateError } = await supabase
+      .from('tbl_operator_applications')
+      .update({
+        status: 'rejected',
+        admin_notes: mergedNotes,
+      })
+      .eq('id', applicationId);
+    if (updateError) {
+      throw new Error(updateError.message || 'Failed to remove driver.');
+    }
+
+    const userId = String(row.user_id || '').trim();
+    if (userId) {
+      const { error: queueError } = await supabase
+        .from('tbl_van_queue')
+        .update({
+          status: 'cancelled',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('operator_user_id', userId)
+        .in('status', ['queued', 'boarding']);
+      if (queueError) {
+        console.warn('Failed to cancel active queue after soft delete:', queueError);
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      applicationId,
+    });
+  } catch (error: any) {
+    const message = error?.message || 'Failed to remove driver.';
     return NextResponse.json({ error: message }, { status: toStatus(message) });
   }
 }

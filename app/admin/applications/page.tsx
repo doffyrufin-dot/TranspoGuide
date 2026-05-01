@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import React, { useEffect, useState } from 'react';
 import { supabase } from '@/utils/supabase/client';
@@ -166,7 +166,7 @@ const AdminApplicationsPage = () => {
     <main>
       {/* Hero */}
       <section className="relative pt-36 pb-16 px-6">
-        <div className="max-w-6xl mx-auto" data-aos="fade-up">
+        <div className="max-w-6xl mx-auto">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
             <div>
               <div className="section-badge mb-5">
@@ -197,7 +197,7 @@ const AdminApplicationsPage = () => {
       {/* Stats */}
       <section className="px-6 pb-10">
         <div className="max-w-6xl mx-auto">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4" data-aos="fade-up" data-aos-delay="100">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[
               { label: 'Total', count: counts.all, icon: <FaClipboardList />, color: 'var(--primary)' },
               { label: 'Pending', count: counts.pending, icon: <FaClock />, color: '#f59e0b' },
@@ -221,7 +221,7 @@ const AdminApplicationsPage = () => {
 
       {/* Applications Table */}
       <section className="px-6 pb-28">
-        <div className="max-w-6xl mx-auto" data-aos="fade-up" data-aos-delay="200">
+        <div className="max-w-6xl mx-auto">
           <div className="card-glow p-6 md:p-8 rounded-2xl">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
               <div className="flex items-center gap-3">
@@ -289,7 +289,7 @@ const AdminApplicationsPage = () => {
                               <FaShuttleVan style={{ color: 'var(--primary)' }} size={13} />
                               <div>
                                 <p className="text-theme font-medium">{app.plate_number}</p>
-                                <p className="text-muted-theme text-xs">{app.vehicle_model} • {app.seating_capacity} seats</p>
+                                <p className="text-muted-theme text-xs">{app.vehicle_model} â€¢ {app.seating_capacity} seats</p>
                               </div>
                             </div>
                           </td>
@@ -454,3 +454,4 @@ const AdminApplicationsPage = () => {
 };
 
 export default AdminApplicationsPage;
+

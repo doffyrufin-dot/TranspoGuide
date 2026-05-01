@@ -1,6 +1,7 @@
-'use client';
+﻿'use client';
 
 import React from 'react';
+import Image from 'next/image';
 import type { AuthUser, OperatorFileInput } from '@/lib/services/register.services';
 import {
   FaArrowRight,
@@ -53,7 +54,7 @@ export default function RegisterApplicationForm({
   return (
     <main>
       <section className="relative pt-36 pb-16 px-6">
-        <div className="max-w-3xl mx-auto text-center" data-aos="fade-up">
+        <div className="max-w-3xl mx-auto text-center">
           <div className="section-badge mx-auto mb-5">Operator Registration</div>
           <h1 className="text-4xl md:text-5xl font-extrabold text-theme leading-tight">
             Register as a{' '}
@@ -72,14 +73,17 @@ export default function RegisterApplicationForm({
         <div className="max-w-3xl mx-auto">
           <div
             className="card-glow p-4 rounded-2xl mb-6 flex items-center gap-4"
-            data-aos="fade-up"
+           
           >
             {user.avatar && (
-              <img
+              <Image
                 src={user.avatar}
                 alt=""
-                className="w-10 h-10 rounded-full shrink-0"
+                width={40}
+                height={40}
+                className="w-10 h-10 rounded-full shrink-0 object-cover"
                 referrerPolicy="no-referrer"
+                sizes="40px"
               />
             )}
             <div className="flex-1 min-w-0">
@@ -102,7 +106,7 @@ export default function RegisterApplicationForm({
           </div>
 
           <form onSubmit={onSubmit} className="space-y-6">
-            <div className="card-glow p-6 md:p-8 rounded-2xl" data-aos="fade-up">
+            <div className="card-glow p-6 md:p-8 rounded-2xl">
               <h2 className="text-theme font-bold text-xl mb-1 flex items-center gap-2">
                 <FaUser style={{ color: 'var(--primary)' }} /> Personal Information
               </h2>
@@ -170,7 +174,7 @@ export default function RegisterApplicationForm({
               </div>
             </div>
 
-            <div className="card-glow p-6 md:p-8 rounded-2xl" data-aos="fade-up">
+            <div className="card-glow p-6 md:p-8 rounded-2xl">
               <h2 className="text-theme font-bold text-xl mb-1 flex items-center gap-2">
                 <FaShuttleVan style={{ color: 'var(--primary)' }} /> Vehicle
                 Information
@@ -225,7 +229,7 @@ export default function RegisterApplicationForm({
               </div>
             </div>
 
-            <div className="card-glow p-6 md:p-8 rounded-2xl" data-aos="fade-up">
+            <div className="card-glow p-6 md:p-8 rounded-2xl">
               <h2 className="text-theme font-bold text-xl mb-1 flex items-center gap-2">
                 <FaFileAlt style={{ color: 'var(--primary)' }} /> Required Documents
               </h2>
@@ -362,3 +366,4 @@ export default function RegisterApplicationForm({
     </main>
   );
 }
+

@@ -1,7 +1,16 @@
 'use client';
 
-import { motion, type MotionProps } from 'framer-motion';
-import type { ReactNode } from 'react';
+import {
+  Children,
+  cloneElement,
+  isValidElement,
+  type CSSProperties,
+  type ReactElement,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { cn } from '@/lib/utils/cn';
 
 type FadeInProps = {
@@ -10,7 +19,8 @@ type FadeInProps = {
   delay?: number;
   y?: number;
   duration?: number;
-} & Omit<MotionProps, 'children'>;
+  style?: CSSProperties;
+};
 
 export function FadeIn({
   children,
@@ -18,19 +28,45 @@ export function FadeIn({
   delay = 0,
   y = 16,
   duration = 0.45,
-  ...props
+  style,
 }: FadeInProps) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const target = ref.current;
+    if (!target) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (!entry?.isIntersecting) return;
+        setVisible(true);
+        observer.disconnect();
+      },
+      { threshold: 0.16 }
+    );
+
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <motion.div
+    <div
+      ref={ref}
       className={cn(className)}
-      initial={{ opacity: 0, y }}
-      whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once: true, amount: 0.18 }}
-      transition={{ duration, delay, ease: 'easeOut' }}
-      {...props}
+      style={{
+        opacity: visible ? 1 : 0,
+        transform: visible ? 'translateY(0)' : `translateY(${y}px)`,
+        transitionProperty: 'opacity, transform',
+        transitionDuration: `${duration}s`,
+        transitionDelay: `${delay}s`,
+        transitionTimingFunction: 'ease-out',
+        ...style,
+      }}
     >
       {children}
-    </motion.div>
+    </div>
   );
 }
 
@@ -41,45 +77,50 @@ type StaggerProps = {
   delayChildren?: number;
 };
 
-export function Stagger({ children, className, stagger = 0.08, delayChildren = 0 }: StaggerProps) {
-  return (
-    <motion.div
-      className={cn(className)}
-      initial="hidden"
-      whileInView="show"
-      viewport={{ once: true, amount: 0.16 }}
-      variants={{
-        hidden: {},
-        show: {
-          transition: {
-            staggerChildren: stagger,
-            delayChildren,
-          },
-        },
-      }}
-    >
-      {children}
-    </motion.div>
-  );
+type StaggerItemInternalProps = {
+  staggerIndex?: number;
+  staggerStep?: number;
+  staggerDelayChildren?: number;
+};
+
+export function Stagger({
+  children,
+  className,
+  stagger = 0.08,
+  delayChildren = 0,
+}: StaggerProps) {
+  const mapped = Children.map(children, (child, index) => {
+    if (!isValidElement(child)) return child;
+
+    return cloneElement(child as ReactElement<StaggerItemInternalProps>, {
+      staggerIndex: index,
+      staggerStep: stagger,
+      staggerDelayChildren: delayChildren,
+    });
+  });
+
+  return <div className={cn(className)}>{mapped}</div>;
 }
 
 type StaggerItemProps = {
   children: ReactNode;
   className?: string;
   y?: number;
-};
+} & StaggerItemInternalProps;
 
-export function StaggerItem({ children, className, y = 16 }: StaggerItemProps) {
+export function StaggerItem({
+  children,
+  className,
+  y = 16,
+  staggerIndex = 0,
+  staggerStep = 0.08,
+  staggerDelayChildren = 0,
+}: StaggerItemProps) {
+  const delay = staggerDelayChildren + staggerIndex * staggerStep;
   return (
-    <motion.div
-      className={cn(className)}
-      variants={{
-        hidden: { opacity: 0, y },
-        show: { opacity: 1, y: 0 },
-      }}
-      transition={{ duration: 0.42, ease: 'easeOut' }}
-    >
+    <FadeIn className={cn(className)} y={y} delay={delay} duration={0.42}>
       {children}
-    </motion.div>
+    </FadeIn>
   );
 }
+

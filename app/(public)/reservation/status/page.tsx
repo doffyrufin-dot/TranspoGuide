@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'next/navigation';
 import type { RealtimeChannel } from '@supabase/supabase-js';
@@ -52,7 +52,17 @@ const statusLabel = (status?: string) => {
   }
 };
 
-const STATUS_POLL_INTERVAL_MS = 12000;
+const STATUS_POLL_INTERVAL_MS = 6000;
+const STATUS_REALTIME_DEBOUNCE_MS = 120;
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible';
+const isExpiredByIso = (value?: string | null) => {
+  const iso = String(value || '').trim();
+  if (!iso) return false;
+  const expiresAtMs = new Date(iso).getTime();
+  if (!Number.isFinite(expiresAtMs)) return false;
+  return expiresAtMs <= Date.now();
+};
 
 export default function ReservationStatusPage() {
   const searchParams = useSearchParams();
@@ -84,6 +94,7 @@ export default function ReservationStatusPage() {
   const [isCreatingCheckout, setIsCreatingCheckout] = useState(false);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [paymentModalError, setPaymentModalError] = useState('');
+  const [hasAcceptedPaymentTerms, setHasAcceptedPaymentTerms] = useState(false);
   const [showRatingModal, setShowRatingModal] = useState(false);
   const [ratingScore, setRatingScore] = useState(5);
   const [ratingFeedback, setRatingFeedback] = useState('');
@@ -94,8 +105,10 @@ export default function ReservationStatusPage() {
   const chatBodyRef = React.useRef<HTMLDivElement | null>(null);
   const hasConfirmedPaymentRef = React.useRef(false);
   const chatRealtimeRef = React.useRef<RealtimeChannel | null>(null);
+  const statusRealtimeRef = React.useRef<RealtimeChannel | null>(null);
   const reserveToastShownRef = React.useRef(false);
   const paymentPromptShownRef = React.useRef(false);
+  const paymentExpiredToastShownRef = React.useRef(false);
   const previousStatusRef = React.useRef('');
   const chatOpenRef = React.useRef(false);
   const seenMessagesInitializedRef = React.useRef(false);
@@ -124,7 +137,7 @@ export default function ReservationStatusPage() {
     });
   }, []);
 
-  const loadStatus = async (
+  const loadStatus = useCallback(async (
     options?: { silent?: boolean }
   ): Promise<ReservationStatusResult | null> => {
     const silent = !!options?.silent;
@@ -147,10 +160,14 @@ export default function ReservationStatusPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [reservationId, reservationToken]);
 
-  const isAwaitingDownpayment =
+  const isPendingPaymentStatus =
     String(reservation?.status || '').toLowerCase() === 'pending_payment';
+  const isPaymentWindowExpired =
+    isPendingPaymentStatus && isExpiredByIso(reservation?.lock_expires_at);
+  const isAwaitingDownpayment =
+    isPendingPaymentStatus && !isPaymentWindowExpired;
   const canRateOperator = (() => {
     const status = String(reservation?.status || '').toLowerCase();
     return (
@@ -271,6 +288,9 @@ export default function ReservationStatusPage() {
       const normalizedStatus = String(
         statusSnapshot?.reservation?.status || ''
       ).toLowerCase();
+      const snapshotPaymentExpired =
+        normalizedStatus === 'pending_payment' &&
+        isExpiredByIso(statusSnapshot?.reservation?.lock_expires_at);
       const alreadyProcessed =
         normalizedStatus === 'pending_operator_approval' ||
         normalizedStatus === 'paid' ||
@@ -281,7 +301,8 @@ export default function ReservationStatusPage() {
       if (
         paymentFlag === 'success' &&
         !hasConfirmedPaymentRef.current &&
-        !alreadyProcessed
+        !alreadyProcessed &&
+        !snapshotPaymentExpired
       ) {
         hasConfirmedPaymentRef.current = true;
         try {
@@ -303,6 +324,18 @@ export default function ReservationStatusPage() {
             description: 'Your downpayment is received. Reservation is now confirmed.',
           });
         } catch (error: any) {
+          const message = String(error?.message || '').toLowerCase();
+          if (message.includes('payment window expired')) {
+            setShowPaymentModal(false);
+            setPaymentModalError('');
+            await loadStatus({ silent: true });
+            sileoToast.warning({
+              title: 'Payment window expired',
+              description:
+                'Your reservation expired before payment confirmation. Please reserve again.',
+            });
+            return;
+          }
           sileoToast.error({
             title: 'Payment sync failed',
             description: error?.message || 'Please refresh after a few seconds.',
@@ -314,11 +347,65 @@ export default function ReservationStatusPage() {
 
     void bootstrap();
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadStatus({ silent: true });
     }, STATUS_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reservationId, reservationToken, paymentFlag, paymentReference]);
+  }, [reservationId, reservationToken, paymentFlag, paymentReference, loadStatus]);
+
+  useEffect(() => {
+    if (!reservationId || !reservationToken) return;
+
+    let refreshTimeout: number | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimeout) return;
+      refreshTimeout = window.setTimeout(() => {
+        refreshTimeout = null;
+        if (!isDocumentVisible()) return;
+        void loadStatus({ silent: true });
+      }, STATUS_REALTIME_DEBOUNCE_MS);
+    };
+
+    const channel = supabase
+      .channel(`reservation-status-${reservationId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_reservations',
+          filter: `id=eq.${reservationId}`,
+        },
+        scheduleRefresh
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_seat_locks',
+          filter: `reservation_id=eq.${reservationId}`,
+        },
+        scheduleRefresh
+      )
+      .subscribe((status: string) => {
+        if (status === 'SUBSCRIBED') {
+          scheduleRefresh();
+        }
+      });
+
+    statusRealtimeRef.current = channel;
+
+    return () => {
+      if (refreshTimeout) {
+        window.clearTimeout(refreshTimeout);
+      }
+      if (statusRealtimeRef.current === channel) {
+        statusRealtimeRef.current = null;
+      }
+      void supabase.removeChannel(channel);
+    };
+  }, [reservationId, reservationToken, loadStatus]);
 
   useEffect(() => {
     if (reservedFlag !== 'success' || reserveToastShownRef.current) return;
@@ -336,30 +423,42 @@ export default function ReservationStatusPage() {
     const previous = previousStatusRef.current;
     previousStatusRef.current = normalized;
 
-    if (normalized !== 'pending_payment') return;
+    if (normalized !== 'pending_payment' || isPaymentWindowExpired) return;
 
     if (!paymentPromptShownRef.current) {
       paymentPromptShownRef.current = true;
+      setHasAcceptedPaymentTerms(false);
       setShowPaymentModal(true);
       return;
     }
 
     if (previous && previous !== normalized) {
       playNotificationSound();
+      setHasAcceptedPaymentTerms(false);
       setShowPaymentModal(true);
       sileoToast.success({
         title: 'Reservation approved',
         description: 'Pay the downpayment now to finalize your seat.',
       });
     }
-  }, [reservation?.status]);
+  }, [reservation?.status, isPaymentWindowExpired]);
 
   useEffect(() => {
     const normalized = String(reservation?.status || '').toLowerCase();
-    if (normalized === 'pending_payment') return;
+    if (normalized === 'pending_payment' && !isPaymentWindowExpired) return;
     setShowPaymentModal(false);
     setPaymentModalError('');
-  }, [reservation?.status]);
+    setHasAcceptedPaymentTerms(false);
+  }, [reservation?.status, isPaymentWindowExpired]);
+
+  useEffect(() => {
+    if (!isPaymentWindowExpired || paymentExpiredToastShownRef.current) return;
+    paymentExpiredToastShownRef.current = true;
+    sileoToast.warning({
+      title: 'Reservation expired',
+      description: 'Payment window ended. Please reserve your seat again.',
+    });
+  }, [isPaymentWindowExpired]);
 
   useEffect(() => {
     if (!reservationId || !reservationToken) return;
@@ -569,12 +668,14 @@ export default function ReservationStatusPage() {
 
   return (
     <>
-    <main className="px-6 py-20">
+    <main className="px-4 sm:px-6 py-16 sm:py-20 pb-28 sm:pb-20">
       <div className="max-w-5xl mx-auto space-y-6">
         <div className="card-glow rounded-2xl p-6">
-          <div className="flex items-center justify-between gap-4 mb-4">
-            <h1 className="text-2xl font-bold text-theme">Reservation Summary</h1>
-            <span className="step-badge flex items-center gap-1.5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+            <h1 className="text-2xl font-bold text-theme leading-tight">
+              Reservation Summary
+            </h1>
+            <span className="step-badge inline-flex w-full sm:w-auto items-start sm:items-center gap-1.5 leading-snug break-words">
               <FaClock size={11} /> {statusLabel(reservation.status)}
             </span>
           </div>
@@ -641,26 +742,56 @@ export default function ReservationStatusPage() {
               <p className="text-xs text-muted-theme mt-1">
                 Please complete your downpayment to finalize your reservation.
               </p>
-              <div className="mt-3 flex items-center gap-2">
+              <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-2">
                 <Button
                   type="button"
                   onClick={() => {
+                    setHasAcceptedPaymentTerms(false);
                     setShowPaymentModal(true);
                     setPaymentModalError('');
                   }}
-                  className="h-9"
+                  className="h-9 w-full sm:w-auto"
                 >
                   Pay Downpayment
                 </Button>
                 <Button
                   type="button"
                   variant="secondary"
-                  className="h-9"
+                  className="h-9 w-full sm:w-auto"
                   onClick={() => {
                     void loadStatus({ silent: false });
                   }}
                 >
                   Refresh
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {isPaymentWindowExpired && (
+            <div
+              className="mt-5 rounded-xl p-4"
+              style={{
+                background: 'rgba(239,68,68,0.12)',
+                border: '1px solid rgba(239,68,68,0.35)',
+              }}
+            >
+              <p className="text-sm font-semibold" style={{ color: '#ef4444' }}>
+                Reservation payment window expired
+              </p>
+              <p className="text-xs text-muted-theme mt-1">
+                This reservation is no longer payable. Please create a new reservation to continue.
+              </p>
+              <div className="mt-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="h-9"
+                  onClick={() => {
+                    window.location.href = '/reservation';
+                  }}
+                >
+                  Reserve Again
                 </Button>
               </div>
             </div>
@@ -756,10 +887,10 @@ export default function ReservationStatusPage() {
           <h3 className="text-xl font-bold text-theme mb-2">
             Reservation Confirmed
           </h3>
-          <p className="text-sm text-muted-theme leading-relaxed">
-            Your reservation is approved by the operator. Please pay the
-            downpayment to finalize your seat.
-          </p>
+            <p className="text-sm text-muted-theme leading-relaxed">
+              Your reservation is approved by the operator. Please pay the
+              downpayment to finalize your seat.
+            </p>
           <div
             className="mt-4 p-3 rounded-xl text-sm"
             style={{
@@ -768,15 +899,45 @@ export default function ReservationStatusPage() {
             }}
           >
             <p className="text-muted-theme">Downpayment Amount</p>
-            <p className="text-theme font-bold text-lg">
-              PHP {Number(reservation.amount_due || 0).toFixed(2)}
-            </p>
-          </div>
-          {paymentModalError && (
-            <p className="mt-3 text-xs font-medium" style={{ color: '#ef4444' }}>
-              {paymentModalError}
-            </p>
-          )}
+              <p className="text-theme font-bold text-lg">
+                PHP {Number(reservation.amount_due || 0).toFixed(2)}
+              </p>
+            </div>
+            <div
+              className="mt-4 rounded-xl p-3 text-xs leading-relaxed"
+              style={{
+                background: 'rgba(245,158,11,0.1)',
+                border: '1px solid rgba(245,158,11,0.35)',
+                color: '#fbbf24',
+              }}
+            >
+              <p className="font-semibold">Payment Terms</p>
+              <p className="mt-1">
+                Downpayment is <span className="font-semibold">non-refundable</span>{' '}
+                once paid. Please review your route, seat, and passenger details
+                before proceeding.
+              </p>
+            </div>
+            <label
+              className="mt-3 flex items-start gap-2 text-xs cursor-pointer"
+              style={{ color: 'var(--tg-text)' }}
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 cursor-pointer"
+                checked={hasAcceptedPaymentTerms}
+                onChange={(e) => setHasAcceptedPaymentTerms(e.target.checked)}
+                disabled={isCreatingCheckout}
+              />
+              <span>
+                I understand and agree that this downpayment is non-refundable.
+              </span>
+            </label>
+            {paymentModalError && (
+              <p className="mt-3 text-xs font-medium" style={{ color: '#ef4444' }}>
+                {paymentModalError}
+              </p>
+            )}
           <div className="mt-6 flex items-center justify-end gap-2">
             <Button
               type="button"
@@ -789,7 +950,7 @@ export default function ReservationStatusPage() {
             <Button
               type="button"
               onClick={() => void handleStartDownpayment()}
-              disabled={isCreatingCheckout}
+              disabled={isCreatingCheckout || !hasAcceptedPaymentTerms}
             >
               {isCreatingCheckout ? 'Opening checkout...' : 'Pay Now'}
             </Button>

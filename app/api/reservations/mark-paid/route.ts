@@ -45,9 +45,15 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ok: true, updated: false });
   } catch (error: any) {
+    const message = String(error?.message || 'Failed to mark reservation as paid.');
+    const normalized = message.toLowerCase();
+    const isConflict =
+      normalized.includes('payment window expired') ||
+      normalized.includes('waiting for operator approval') ||
+      normalized.includes('status does not allow payment');
     return NextResponse.json(
-      { error: error?.message || 'Failed to mark reservation as paid.' },
-      { status: 500 }
+      { error: message },
+      { status: isConflict ? 409 : 500 }
     );
   }
 }

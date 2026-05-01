@@ -18,7 +18,12 @@ type SeatMapItem = {
   passengerName: string | null;
   reservationId: string | null;
   source: 'reservation' | 'walk_in' | null;
+  walkInDiscounted?: boolean;
 };
+
+const VEHICLE_SEATMAP_POLL_MS = 25000;
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible';
 
 export default function VehicleManagementTab({ accessToken }: Props) {
   const [queueRows, setQueueRows] = useState<QueueEntry[]>([]);
@@ -30,6 +35,7 @@ export default function VehicleManagementTab({ accessToken }: Props) {
   const [seatActionLoading, setSeatActionLoading] = useState(false);
   const [selectedSeatLabel, setSelectedSeatLabel] = useState('');
   const [walkInName, setWalkInName] = useState('');
+  const [walkInIsDiscounted, setWalkInIsDiscounted] = useState(false);
 
   const tripDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const selectedQueue = queueRows.find((row) => row.id === selectedQueueId) || null;
@@ -74,7 +80,6 @@ export default function VehicleManagementTab({ accessToken }: Props) {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
-        cache: 'no-store',
       });
       const result = await response.json().catch(() => null);
       if (!response.ok) {
@@ -113,8 +118,9 @@ export default function VehicleManagementTab({ accessToken }: Props) {
 
     void loadSeatMap(false);
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadSeatMap(true);
-    }, 15000);
+    }, VEHICLE_SEATMAP_POLL_MS);
 
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -150,6 +156,7 @@ export default function VehicleManagementTab({ accessToken }: Props) {
           tripKey,
           seatLabel: selectedSeatLabel,
           passengerName: walkInName.trim(),
+          isDiscounted: walkInIsDiscounted,
         }),
       });
       const result = await response.json().catch(() => null);
@@ -160,6 +167,7 @@ export default function VehicleManagementTab({ accessToken }: Props) {
       setSeatMap((result?.seats || []) as SeatMapItem[]);
       setSelectedSeatLabel('');
       setWalkInName('');
+      setWalkInIsDiscounted(false);
       sileoToast.success({ title: 'Walk-in seat assigned' });
     } catch (err: any) {
       sileoToast.error({
@@ -367,6 +375,15 @@ export default function VehicleManagementTab({ accessToken }: Props) {
                     className="input-dark w-full"
                     disabled={seatActionLoading || seatMapLoading}
                   />
+                  <select
+                    value={walkInIsDiscounted ? 'discounted' : 'regular'}
+                    onChange={(e) => setWalkInIsDiscounted(e.target.value === 'discounted')}
+                    disabled={seatActionLoading || seatMapLoading}
+                    className="input-dark w-full md:w-52"
+                  >
+                    <option value="regular">Regular Fare</option>
+                    <option value="discounted">Discounted Fare</option>
+                  </select>
                   <button
                     onClick={() => void assignWalkIn()}
                     disabled={
@@ -395,7 +412,12 @@ export default function VehicleManagementTab({ accessToken }: Props) {
                             Seat {seat.seatLabel} - {seat.passengerName || 'Passenger'}
                           </p>
                           <p className="text-muted-theme text-xs uppercase">
-                            {seat.source === 'walk_in' ? 'walk-in' : 'online reservation'} | {seat.status}
+                            {seat.source === 'walk_in'
+                              ? seat.walkInDiscounted
+                                ? 'walk-in discounted'
+                                : 'walk-in regular'
+                              : 'online reservation'}{' '}
+                            | {seat.status}
                           </p>
                         </div>
                         {seat.source === 'walk_in' && (

@@ -6,7 +6,6 @@ import {
   AlertCircle,
   Bus,
   Calendar,
-  TrendingUp,
 } from 'lucide-react';
 import sileoToast from '@/lib/utils/sileo-toast';
 
@@ -68,7 +67,6 @@ export default function OverviewTab({ currentTheme, accessToken }: Props) {
           headers: {
             Authorization: `Bearer ${accessToken}`,
           },
-          cache: 'no-store',
         });
         const data = (await res.json()) as OverviewResponse & { error?: string };
         if (!res.ok) {
@@ -108,15 +106,6 @@ export default function OverviewTab({ currentTheme, accessToken }: Props) {
         value: String(overview.stats.activeVans || 0),
         icon: Bus,
         color: '#22c55e',
-      },
-      {
-        title: 'Total Revenue',
-        value: `P${Number(overview.stats.totalRevenue || 0).toLocaleString('en-PH', {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })}`,
-        icon: TrendingUp,
-        color: '#a855f7',
       },
       {
         title: 'Pending Issues',
@@ -184,7 +173,7 @@ export default function OverviewTab({ currentTheme, accessToken }: Props) {
 
   return (
     <div className="admin-tab space-y-6">
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {stats.map((stat, index) => (
           <div
             key={index}

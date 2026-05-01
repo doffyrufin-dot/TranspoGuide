@@ -29,6 +29,8 @@ export interface CreateReservationIntentPayload {
   passengerEmail: string;
   contactNumber: string;
   pickupLocation: string;
+  pickupLat: number;
+  pickupLng: number;
   route: string;
   seatLabels: string[];
   amount: number;
@@ -63,6 +65,7 @@ export interface ReservationStatusPayload {
   status: string;
   payment_id: string | null;
   paid_at: string | null;
+  lock_expires_at?: string | null;
   created_at: string;
   operator_user_id: string | null;
   queue_id: string | null;

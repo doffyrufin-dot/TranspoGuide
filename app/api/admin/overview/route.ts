@@ -1,10 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-
-type AdminContext = {
-  supabaseUrl: string;
-  serviceRoleKey: string;
-};
+import { requireAdminServiceClient } from '@/lib/server/admin-auth';
 
 type ReservationRow = {
   id: string;
@@ -17,49 +12,6 @@ type ReservationRow = {
 const isPaidLike = (status?: string | null) => {
   const s = (status || '').toLowerCase();
   return s === 'paid' || s === 'confirmed';
-};
-
-const getAdminContext = async (req: NextRequest): Promise<AdminContext> => {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
-    throw new Error('server_env_missing');
-  }
-
-  const authHeader = req.headers.get('authorization') || '';
-  const token = authHeader.startsWith('Bearer ')
-    ? authHeader.slice(7).trim()
-    : '';
-  if (!token) throw new Error('missing_auth_token');
-
-  const authClient = createClient(supabaseUrl, anonKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-
-  const {
-    data: { user },
-    error: userError,
-  } = await authClient.auth.getUser(token);
-
-  if (userError || !user) throw new Error('unauthorized');
-
-  const serviceClient = createClient(supabaseUrl, serviceRoleKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  });
-
-  const { data: roleRows, error: roleError } = await serviceClient
-    .from('tbl_users')
-    .select('role')
-    .eq('user_id', user.id)
-    .limit(1);
-
-  if (roleError) throw new Error(roleError.message || 'Failed to verify admin role.');
-  const role = (roleRows?.[0]?.role || '').toLowerCase();
-  if (role !== 'admin') throw new Error('forbidden');
-
-  return { supabaseUrl, serviceRoleKey };
 };
 
 const toStatus = (message: string) => {
@@ -85,10 +37,7 @@ const dayKey = (date: Date) =>
 
 export async function GET(req: NextRequest) {
   try {
-    const ctx = await getAdminContext(req);
-    const supabase = createClient(ctx.supabaseUrl, ctx.serviceRoleKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    });
+    const { serviceClient: supabase } = await requireAdminServiceClient(req);
 
     const now = new Date();
     const weekStart = startOfWeekMonday(now);
@@ -177,22 +126,30 @@ export async function GET(req: NextRequest) {
       return acc + Number(row.amount_due || 0);
     }, 0);
 
-    return NextResponse.json({
-      stats: {
-        totalBookings: Number(bookingsCountRes.count || 0),
-        activeVans: Number(activeVansRes.count || 0),
-        totalRevenue: Number(totalRevenue || 0),
-        weeklyRevenue: Number(weeklyRevenue || 0),
-        pendingIssues: Number(pendingAppsRes.count || 0),
+    return NextResponse.json(
+      {
+        stats: {
+          totalBookings: Number(bookingsCountRes.count || 0),
+          activeVans: Number(activeVansRes.count || 0),
+          totalRevenue: Number(totalRevenue || 0),
+          weeklyRevenue: Number(weeklyRevenue || 0),
+          pendingIssues: Number(pendingAppsRes.count || 0),
+        },
+        weekly: {
+          labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+          bookings: weekDays.map((d) => bookingMap.get(dayKey(d)) || 0),
+          revenue: weekDays.map((d) => revenueMap.get(dayKey(d)) || 0),
+        },
       },
-      weekly: {
-        labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-        bookings: weekDays.map((d) => bookingMap.get(dayKey(d)) || 0),
-        revenue: weekDays.map((d) => revenueMap.get(dayKey(d)) || 0),
-      },
-    });
+      {
+        headers: {
+          'Cache-Control': 'private, max-age=20, stale-while-revalidate=40',
+        },
+      }
+    );
   } catch (error: any) {
     const message = error?.message || 'Failed to load overview.';
     return NextResponse.json({ error: message }, { status: toStatus(message) });
   }
 }
+

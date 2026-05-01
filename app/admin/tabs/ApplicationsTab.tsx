@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import Image from 'next/image';
 import { Bus, ClipboardList, Eye, FileText, UserCheck, UserX, X } from 'lucide-react';
 import { supabase } from '@/utils/supabase/client';
 import sileoToast from '@/lib/utils/sileo-toast';
@@ -506,10 +507,13 @@ export default function ApplicationsTab({
                     />
                   ) : (
                     <div className="flex items-center justify-center p-4" style={{ background: 'var(--tg-bg-alt)' }}>
-                      <img
+                      <Image
                         src={previewUrl}
                         alt={previewLabel}
+                        width={960}
+                        height={540}
                         className="max-w-full max-h-[400px] rounded-lg object-contain"
+                        sizes="(max-width: 768px) 90vw, 800px"
                       />
                     </div>
                   )}

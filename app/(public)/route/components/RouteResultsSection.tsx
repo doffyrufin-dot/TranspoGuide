@@ -1,8 +1,10 @@
 'use client';
 
 import React from 'react';
+import Image from 'next/image';
 import { FaClock } from 'react-icons/fa';
 import { iconForVehicle } from '../lib/route-ui';
+import { resolveVehicleImageUrl } from '@/lib/utils/vehicle-image';
 import {
   type RouteFareRow,
   type RouteMetric,
@@ -31,6 +33,16 @@ export default function RouteResultsSection({
   metricsLoading,
 }: RouteResultsSectionProps) {
   if (!show) return null;
+  const hasDiscountedRows = rows.some(
+    (row) =>
+      row.source !== 'barangay_fare' && Number(row.discount_rate || 0) > 0
+  );
+  const gridClassName =
+    rows.length === 1
+      ? 'grid grid-cols-1 gap-5 max-w-sm mx-auto'
+      : rows.length === 2
+        ? 'grid grid-cols-1 sm:grid-cols-2 gap-5 max-w-3xl mx-auto'
+        : 'grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5';
 
   return (
     <section className="px-6 pb-28">
@@ -49,6 +61,15 @@ export default function RouteResultsSection({
           </div>
         ) : (
           <div className="space-y-3">
+            {hasDiscountedRows && (
+              <div
+                className="text-sm md:text-base font-semibold text-center max-w-3xl mx-auto"
+                style={{ color: 'var(--tg-text)' }}
+              >
+                Discounted fare applies only to Students, Seniors, Pregnant,
+                and PWD passengers.
+              </div>
+            )}
             {metricsLoading && (
               <div className="text-xs text-muted-theme text-center py-2">
                 <div className="inline-flex items-center gap-2">
@@ -57,12 +78,13 @@ export default function RouteResultsSection({
                 </div>
               </div>
             )}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-              {rows.map((r) => {
+            <div className={gridClassName}>
+              {rows.map((r, index) => {
                 const regularFare = Number(r.regular_fare || 0);
                 const discountRate = Number(r.discount_rate || 0);
                 const discounted = regularFare * (1 - discountRate);
                 const savings = regularFare - discounted;
+                const showDiscounted = r.source !== 'barangay_fare';
                 const key = normalizeRouteKey(
                   r.origin,
                   r.destination,
@@ -89,10 +111,18 @@ export default function RouteResultsSection({
                         className="h-40 w-full"
                         style={{ background: 'var(--tg-subtle)' }}
                       >
-                        <img
-                          src={imageForVehicle(r.vehicle_type)}
+                        <Image
+                          src={
+                            resolveVehicleImageUrl(r.vehicle_image_url) ||
+                            imageForVehicle(r.vehicle_type)
+                          }
                           alt={r.vehicle_type}
+                          width={640}
+                          height={320}
                           className="w-full h-full object-cover"
+                          loading={index < 2 ? 'eager' : 'lazy'}
+                          priority={index < 2}
+                          sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
                         />
                       </div>
 
@@ -121,21 +151,25 @@ export default function RouteResultsSection({
                               P{regularFare.toFixed(2)}
                             </span>
                           </p>
-                          <p className="text-muted-theme text-sm">
-                            Discounted:{' '}
-                            <span
-                              style={{ color: 'var(--primary)' }}
-                              className="font-bold"
-                            >
-                              P{discounted.toFixed(2)}
-                            </span>
-                          </p>
-                          <p className="text-muted-theme text-sm">
-                            You save:{' '}
-                            <span className="text-theme font-semibold">
-                              P{savings.toFixed(2)}
-                            </span>
-                          </p>
+                          {showDiscounted && (
+                            <>
+                              <p className="text-muted-theme text-sm">
+                                Discounted:{' '}
+                                <span
+                                  style={{ color: 'var(--primary)' }}
+                                  className="font-bold"
+                                >
+                                  P{discounted.toFixed(2)}
+                                </span>
+                              </p>
+                              <p className="text-muted-theme text-sm">
+                                You save:{' '}
+                                <span className="text-theme font-semibold">
+                                  P{savings.toFixed(2)}
+                                </span>
+                              </p>
+                            </>
+                          )}
                         </div>
 
                         <div className="mt-4 grid grid-cols-2 gap-2">
@@ -180,4 +214,3 @@ export default function RouteResultsSection({
     </section>
   );
 }
-

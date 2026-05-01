@@ -1,4 +1,6 @@
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
+import Image from 'next/image';
 import { redirect } from 'next/navigation';
 import AuthHashToast from '@/app/(public)/components/AuthHashToast';
 import {
@@ -15,7 +17,19 @@ import {
 } from 'react-icons/fa';
 import { FadeIn, Stagger, StaggerItem } from '@/components/ui/motion';
 import { listTrustedOperatorRatings } from '@/lib/db/operator-feedback';
-import TrustedOperatorsGrid from '@/app/(public)/components/TrustedOperatorsGrid';
+
+const TrustedOperatorsGrid = dynamic(
+  () => import('@/app/(public)/components/TrustedOperatorsGrid'),
+  {
+    loading: () => (
+      <div className="card-glow rounded-2xl p-6 text-center text-sm text-muted-theme">
+        Loading operator ratings...
+      </div>
+    ),
+  }
+);
+
+export const revalidate = 120;
 
 const FEATURES = [
   {
@@ -163,13 +177,12 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
                 className="relative w-full aspect-video rounded-xl overflow-hidden"
                 style={{ background: 'var(--tg-bg-alt)' }}
               >
-                <video
+                <Image
+                  src="/images/bgterminal.jpg"
+                  alt="Isabel Integrated Bus Terminal"
+                  fill
+                  sizes="(max-width: 1024px) 100vw, 50vw"
                   className="absolute inset-0 w-full h-full object-cover rounded-xl"
-                  src="/videos/vids.mp4"
-                  autoPlay
-                  loop
-                  muted
-                  playsInline
                 />
                 <div className="absolute inset-0 rounded-xl backdrop-blur-[2px] bg-black/40" />
               </div>
@@ -220,7 +233,7 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
       </section>
 
       {showTrustedOperatorSection && (
-        <section className="py-20 px-6">
+        <section id="trusted-operators" className="py-20 px-6">
           <div className="max-w-7xl mx-auto">
             <FadeIn className="text-center mb-12">
               <h2 className="text-3xl md:text-4xl font-extrabold text-theme">
@@ -234,7 +247,9 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
               </p>
               <div className="mt-4 inline-flex items-center gap-2 p-1 rounded-xl border border-[var(--tg-border)] bg-[var(--tg-bg-alt)]">
                 <Link
-                  href="/"
+                  href="/#trusted-operators"
+                  scroll={false}
+                  replace
                   className="px-3 py-1.5 text-xs font-semibold rounded-lg transition"
                   style={
                     !trustedOnly
@@ -245,7 +260,9 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
                   All Rated
                 </Link>
                 <Link
-                  href="/?trusted=1"
+                  href="/?trusted=1#trusted-operators"
+                  scroll={false}
+                  replace
                   className="px-3 py-1.5 text-xs font-semibold rounded-lg transition"
                   style={
                     trustedOnly

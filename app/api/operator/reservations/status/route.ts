@@ -338,10 +338,17 @@ export async function POST(req: NextRequest) {
       emailError: mailResult && !mailResult.sent ? mailResult.reason || 'email_send_failed' : null,
     });
   } catch (error: unknown) {
-    const message =
+    const rawMessage =
       error instanceof Error && error.message
         ? error.message
         : 'Failed to update reservation status.';
+    const normalized = String(rawMessage).toLowerCase();
+    const isStatusConstraintMismatch =
+      normalized.includes('tbl_reservations_status_check') ||
+      normalized.includes('violates check constraint');
+    const message = isStatusConstraintMismatch
+      ? 'Reservation status update blocked by database schema. Run supabase/sql/reservations_status_expand.sql, then try again.'
+      : rawMessage;
     return NextResponse.json(
       { error: message },
       { status: 500 }

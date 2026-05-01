@@ -9,6 +9,22 @@ type NotificationItem = {
   target_tab?: 'Reservations' | 'Settings';
 };
 
+const PAYMENT_WAIT_MINUTES = 15;
+const PAID_NOTIFICATION_WINDOW_HOURS = 24;
+
+const toTimestamp = (value?: string | null) => {
+  const iso = String(value || '').trim();
+  if (!iso) return 0;
+  const ts = new Date(iso).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+};
+
+const toIso = (value?: string | null) => {
+  const ts = toTimestamp(value);
+  if (!ts) return new Date().toISOString();
+  return new Date(ts).toISOString();
+};
+
 const isMissingSchemaError = (error: unknown) => {
   if (!error || typeof error !== 'object') return false;
   const err = error as { code?: string; message?: string };
@@ -62,9 +78,9 @@ export async function GET(req: NextRequest) {
       .from('tbl_reservations')
       .select('id, full_name, route, status, paid_at, created_at, updated_at')
       .eq('operator_user_id', user.id)
-      .in('status', ['pending_operator_approval', 'pending_payment'])
+      .in('status', ['pending_operator_approval', 'pending_payment', 'paid', 'confirmed'])
       .order('updated_at', { ascending: false })
-      .limit(12);
+      .limit(30);
 
     if (reservationError) {
       return NextResponse.json(
@@ -73,17 +89,66 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const nowMs = Date.now();
+    const pendingPaymentCutoffMs = nowMs - PAYMENT_WAIT_MINUTES * 60 * 1000;
+    const paidCutoffMs =
+      nowMs - PAID_NOTIFICATION_WINDOW_HOURS * 60 * 60 * 1000;
     const rows = reservationRows || [];
-    const notifications: NotificationItem[] = rows.map((row: any) => {
-      const baseDate = row.updated_at || row.paid_at || row.created_at || new Date().toISOString();
-      return {
-        id: `res-${row.id}`,
-        title: 'New reservation request',
-        description: `${row.full_name || 'Passenger'} - ${row.route || 'Route not set'}`,
-        created_at: baseDate,
-        target_tab: 'Reservations',
-      };
-    });
+    const notifications: NotificationItem[] = [];
+
+    for (const row of rows) {
+      const status = String(row?.status || '').trim().toLowerCase();
+      const route = String(row?.route || 'Route not set').trim() || 'Route not set';
+      const passenger = String(row?.full_name || 'Passenger').trim() || 'Passenger';
+      const updatedAtMs = toTimestamp(row?.updated_at);
+      const paidAtMs = toTimestamp(row?.paid_at);
+      const updatedAtIso = toIso(row?.updated_at || row?.created_at);
+
+      if (status === 'pending_operator_approval') {
+        notifications.push({
+          id: `res-request-${row.id}-${updatedAtMs || toTimestamp(row?.created_at) || 0}`,
+          title: 'New reservation request',
+          description: `${passenger} - ${route}`,
+          created_at: updatedAtIso,
+          target_tab: 'Reservations',
+        });
+        continue;
+      }
+
+      if (status === 'pending_payment') {
+        if (updatedAtMs > 0 && updatedAtMs < pendingPaymentCutoffMs) {
+          // Hide stale unpaid requests after the allowed payment window.
+          continue;
+        }
+        notifications.push({
+          id: `res-awaiting-payment-${row.id}-${updatedAtMs || 0}`,
+          title: 'Awaiting downpayment',
+          description: `${passenger} - waiting payment (${route})`,
+          created_at: updatedAtIso,
+          target_tab: 'Reservations',
+        });
+        continue;
+      }
+
+      if (status === 'paid' || status === 'confirmed') {
+        const paidOrUpdatedMs = paidAtMs || updatedAtMs;
+        if (!paidOrUpdatedMs || paidOrUpdatedMs < paidCutoffMs) {
+          continue;
+        }
+        notifications.push({
+          id: `res-paid-${row.id}-${paidOrUpdatedMs}`,
+          title: 'Downpayment received',
+          description: `${passenger} paid downpayment - ${route}`,
+          created_at: toIso(row?.paid_at || row?.updated_at || row?.created_at),
+          target_tab: 'Reservations',
+        });
+      }
+    }
+
+    notifications.sort(
+      (a, b) =>
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
 
     const [{ data: appRows }, { data: paymentAccountRows, error: paymentAccountError }] =
       await Promise.all([
@@ -141,10 +206,17 @@ export async function GET(req: NextRequest) {
 
     const unreadCount = notifications.length;
 
-    return NextResponse.json({
-      unreadCount,
-      notifications,
-    });
+    return NextResponse.json(
+      {
+        unreadCount,
+        notifications,
+      },
+      {
+        headers: {
+          'Cache-Control': 'private, no-store',
+        },
+      }
+    );
   } catch (error: any) {
     return NextResponse.json(
       { error: error?.message || 'Unexpected error.' },

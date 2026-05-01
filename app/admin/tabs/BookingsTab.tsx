@@ -24,6 +24,10 @@ type Props = {
   accessToken: string;
 };
 
+const BOOKINGS_POLL_MS = 30000;
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible';
+
 export default function BookingsTab({ accessToken }: Props) {
   const [scope, setScope] = useState<'boarding' | 'active'>('boarding');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Pending' | 'Confirmed' | 'Cancelled'>('All');
@@ -37,7 +41,6 @@ export default function BookingsTab({ accessToken }: Props) {
       const params = new URLSearchParams({ scope });
       const res = await fetch(`/api/admin/reservations?${params.toString()}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
-        cache: 'no-store',
       });
       const data = await res.json();
       if (!res.ok) {
@@ -65,8 +68,9 @@ export default function BookingsTab({ accessToken }: Props) {
   useEffect(() => {
     if (!accessToken) return;
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadBookings(true);
-    }, 15000);
+    }, BOOKINGS_POLL_MS);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope, accessToken]);

@@ -27,6 +27,7 @@ export default function DriversStaffTab({ accessToken }: { accessToken: string }
   const [filterRole, setFilterRole] = useState('All');
   const [loading, setLoading] = useState(true);
   const [operators, setOperators] = useState<OperatorRow[]>([]);
+  const [removingOperatorId, setRemovingOperatorId] = useState('');
   const [selectedOperator, setSelectedOperator] = useState<OperatorRow | null>(null);
   const [docPreview, setDocPreview] = useState<{ label: string; url: string } | null>(null);
 
@@ -38,7 +39,6 @@ export default function DriversStaffTab({ accessToken }: { accessToken: string }
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
-        cache: 'no-store',
       });
       const data = await res.json();
       if (!res.ok) {
@@ -62,6 +62,47 @@ export default function DriversStaffTab({ accessToken }: { accessToken: string }
     void loadOperators(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken]);
+
+  const handleSoftDelete = async (row: OperatorRow) => {
+    if (!accessToken || !row?.id || removingOperatorId) return;
+    const confirmed = window.confirm(
+      `Soft delete driver "${row.name}"?\n\nThis will mark the operator application as rejected and remove from Drivers list.`
+    );
+    if (!confirmed) return;
+
+    try {
+      setRemovingOperatorId(row.id);
+      const res = await fetch('/api/admin/operators', {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          applicationId: row.id,
+          reason: 'Removed from Drivers tab by admin',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error || 'Failed to remove driver.');
+      }
+
+      setOperators((prev) => prev.filter((item) => item.id !== row.id));
+      setSelectedOperator(null);
+      sileoToast.success({
+        title: 'Driver removed',
+        description: `${row.name} is now soft-deleted from drivers list.`,
+      });
+    } catch (err: any) {
+      sileoToast.error({
+        title: 'Remove failed',
+        description: err?.message || 'Please try again.',
+      });
+    } finally {
+      setRemovingOperatorId('');
+    }
+  };
 
   const filtered = useMemo(() => {
     if (filterRole === 'All') return operators;
@@ -252,6 +293,42 @@ export default function DriversStaffTab({ accessToken }: { accessToken: string }
                   </div>
                 ))}
               </div>
+            </div>
+
+            <div
+              className="mt-4 pt-4 flex items-center justify-end gap-2"
+              style={{ borderTop: '1px solid var(--tg-border)' }}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedOperator(null);
+                  setDocPreview(null);
+                }}
+                className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  color: 'var(--tg-muted)',
+                  border: '1px solid var(--tg-border)',
+                }}
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSoftDelete(selectedOperator)}
+                disabled={removingOperatorId === selectedOperator.id}
+                className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
+                style={{
+                  background: 'rgba(239,68,68,0.12)',
+                  color: '#ef4444',
+                  border: '1px solid rgba(239,68,68,0.35)',
+                }}
+              >
+                {removingOperatorId === selectedOperator.id
+                  ? 'Removing...'
+                  : 'Soft Delete Driver'}
+              </button>
             </div>
           </div>
         </div>,

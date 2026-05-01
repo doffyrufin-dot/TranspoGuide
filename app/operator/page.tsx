@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useMemo, useCallback, ElementType } from 'react';
 import { createPortal } from 'react-dom';
 import dynamic from 'next/dynamic';
+import Image from 'next/image';
 import 'leaflet/dist/leaflet.css';
 import type { AuthChangeEvent, RealtimeChannel, Session } from '@supabase/supabase-js';
 import { supabase } from '@/utils/supabase/client';
@@ -19,6 +20,7 @@ import {
   markOperatorReservationChatSeen,
   fetchOperatorPaymentHistory,
   fetchOperatorPaymentAccountStatus,
+  fetchOperatorProfile,
   fetchOperatorRatingSummary,
   fetchOperatorReservationMessages,
   fetchOperatorReservations,
@@ -29,9 +31,11 @@ import {
   type OperatorReservationMessage,
   type OperatorPaymentRecord,
   type OperatorPaymentAccountStatusResult,
+  type OperatorProfileResult,
   type OperatorRatingSummaryResult,
   type OperatorReservationRecord,
   saveOperatorPaymentAccount,
+  saveOperatorProfile,
 } from '@/lib/services/operator.services';
 import {
   fetchActiveQueue,
@@ -89,9 +93,16 @@ const isAbortLikeError = (error: unknown) => {
   return name.includes('abort') || message.includes('aborted');
 };
 
-const CHAT_UNREAD_REFRESH_MS = 30000;
-const CHAT_LIST_REFRESH_MS = 10000;
-const CHAT_THREAD_REFRESH_MS = 10000;
+const CHAT_UNREAD_REFRESH_MS = 60000;
+const CHAT_LIST_REFRESH_MS = 30000;
+const CHAT_THREAD_REFRESH_MS = 30000;
+const NOTIFICATION_REFRESH_MS = 5000;
+const MY_VEHICLE_QUEUE_REFRESH_MS = 300000;
+const MY_VEHICLE_SEATMAP_REFRESH_MS = 40000;
+const GEOCODE_CACHE_TTL_MS = 30 * 60 * 1000;
+const GEOCODE_CACHE_MAX_ENTRIES = 120;
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible';
 
 type DashboardNotification = {
   id: string;
@@ -101,19 +112,31 @@ type DashboardNotification = {
   target_tab?: 'Reservations' | 'Settings';
 };
 
+type OperatorUiSettings = {
+  dashboardNotificationSoundEnabled: boolean;
+  chatUnreadSoundEnabled: boolean;
+};
+
+const OPERATOR_UI_SETTINGS_KEY_PREFIX = 'tg_operator_ui_settings_v1_';
+const DEFAULT_OPERATOR_UI_SETTINGS: OperatorUiSettings = {
+  dashboardNotificationSoundEnabled: true,
+  chatUnreadSoundEnabled: true,
+};
+
 type OperatorSeatMapItem = {
   seatLabel: string;
   status: 'available' | 'locked' | 'reserved';
   passengerName: string | null;
   reservationId: string | null;
   source: 'reservation' | 'walk_in' | null;
+  walkInDiscounted?: boolean;
 };
 
 export default function OperatorDashboard() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [activeView, setActiveView] = useState('Reservations');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [operatorName, setOperatorName] = useState('Operator');
   const [operatorEmail, setOperatorEmail] = useState('');
   const [operatorAvatarUrl, setOperatorAvatarUrl] = useState('');
@@ -128,8 +151,13 @@ export default function OperatorDashboard() {
   const [paymentSetupLoading, setPaymentSetupLoading] = useState(false);
   const [paymentSetupPromptDismissed, setPaymentSetupPromptDismissed] =
     useState(false);
+  const [operatorUiSettings, setOperatorUiSettings] = useState<OperatorUiSettings>(
+    DEFAULT_OPERATOR_UI_SETTINGS
+  );
   const notifSoundReadyRef = React.useRef(false);
   const notifTopIdRef = React.useRef('');
+  const notifOpenRef = React.useRef(false);
+  const operatorUiSettingsRef = React.useRef(DEFAULT_OPERATOR_UI_SETTINGS);
 
   useEffect(() => {
     let cancelled = false;
@@ -231,6 +259,43 @@ export default function OperatorDashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!operatorUserId || typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(
+        `${OPERATOR_UI_SETTINGS_KEY_PREFIX}${operatorUserId}`
+      );
+      if (!raw) {
+        setOperatorUiSettings(DEFAULT_OPERATOR_UI_SETTINGS);
+        return;
+      }
+      const parsed = JSON.parse(raw) as Partial<OperatorUiSettings>;
+      setOperatorUiSettings({
+        dashboardNotificationSoundEnabled:
+          parsed.dashboardNotificationSoundEnabled ??
+          DEFAULT_OPERATOR_UI_SETTINGS.dashboardNotificationSoundEnabled,
+        chatUnreadSoundEnabled:
+          parsed.chatUnreadSoundEnabled ??
+          DEFAULT_OPERATOR_UI_SETTINGS.chatUnreadSoundEnabled,
+      });
+    } catch {
+      setOperatorUiSettings(DEFAULT_OPERATOR_UI_SETTINGS);
+    }
+  }, [operatorUserId]);
+
+  useEffect(() => {
+    if (!operatorUserId || typeof window === 'undefined') return;
+    window.localStorage.setItem(
+      `${OPERATOR_UI_SETTINGS_KEY_PREFIX}${operatorUserId}`,
+      JSON.stringify(operatorUiSettings)
+    );
+    operatorUiSettingsRef.current = operatorUiSettings;
+  }, [operatorUserId, operatorUiSettings]);
+
+  useEffect(() => {
+    notifOpenRef.current = notifOpen;
+  }, [notifOpen]);
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     window.location.replace('/login');
@@ -241,25 +306,35 @@ export default function OperatorDashboard() {
     setIsSidebarOpen(false);
   };
 
-  const loadNotifications = useCallback(async (silent = false) => {
+  const loadNotifications = useCallback(async () => {
     if (!sessionToken) return;
     try {
-      const res = await fetch('/api/operator/notifications', {
+      const res = await fetch(
+        `/api/operator/notifications?t=${Date.now().toString(36)}`,
+        {
         headers: {
           Authorization: `Bearer ${sessionToken}`,
         },
-        cache: 'no-store',
-      });
+          cache: 'no-store',
+        }
+      );
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || 'Failed to load notifications.');
       }
       const nextNotifications = (data.notifications || []) as DashboardNotification[];
-      const nextTopId = String(nextNotifications[0]?.id || '').trim();
+      const nextTopId = String(
+        nextNotifications.find((item) => item.id !== 'setup-payment-account')?.id ||
+          nextNotifications[0]?.id ||
+          ''
+      ).trim();
+      const soundEnabled =
+        operatorUiSettingsRef.current.dashboardNotificationSoundEnabled;
       if (
         notifSoundReadyRef.current &&
         nextTopId &&
-        nextTopId !== notifTopIdRef.current
+        nextTopId !== notifTopIdRef.current &&
+        soundEnabled
       ) {
         playNotificationSound();
       }
@@ -268,13 +343,13 @@ export default function OperatorDashboard() {
       }
       notifTopIdRef.current = nextTopId;
       setNotifications(nextNotifications);
-      if (!notifOpen) {
+      if (!notifOpenRef.current) {
         setNotifUnreadCount(Number(data.unreadCount || 0));
       }
     } catch {
       // silent fail for bell data
     }
-  }, [sessionToken, notifOpen]);
+  }, [sessionToken]);
 
   const loadPaymentSetupStatus = useCallback(async () => {
     if (!sessionToken) return;
@@ -294,12 +369,36 @@ export default function OperatorDashboard() {
 
   useEffect(() => {
     if (!sessionToken) return;
-    void loadNotifications(false);
+    void loadNotifications();
     const timer = window.setInterval(() => {
-      void loadNotifications(true);
-    }, 30000);
+      if (!isDocumentVisible()) return;
+      void loadNotifications();
+    }, NOTIFICATION_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [sessionToken, notifOpen, loadNotifications]);
+  }, [sessionToken, loadNotifications]);
+
+  useEffect(() => {
+    if (!sessionToken || typeof window === 'undefined') return;
+    const handleVisibilityOrFocus = () => {
+      if (!isDocumentVisible()) return;
+      void loadNotifications();
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    }
+
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener(
+          'visibilitychange',
+          handleVisibilityOrFocus
+        );
+      }
+    };
+  }, [sessionToken, loadNotifications]);
 
   useEffect(() => {
     if (!sessionToken || !operatorUserId) return;
@@ -314,9 +413,9 @@ export default function OperatorDashboard() {
       if (refreshTimeout) return;
       refreshTimeout = window.setTimeout(() => {
         refreshTimeout = null;
-        void loadNotifications(true);
+        void loadNotifications();
         void loadPaymentSetupStatus();
-      }, 250);
+      }, 80);
     };
 
     const notificationsChannel = supabase
@@ -351,7 +450,11 @@ export default function OperatorDashboard() {
         },
         scheduleRefresh
       )
-      .subscribe();
+      .subscribe((status: string) => {
+        if (status === 'SUBSCRIBED') {
+          scheduleRefresh();
+        }
+      });
 
     return () => {
       if (refreshTimeout) {
@@ -397,6 +500,17 @@ export default function OperatorDashboard() {
         return (
           <OperatorSettingsContent
             accessToken={sessionToken}
+            operatorUserId={operatorUserId}
+            displayName={operatorName}
+            displayEmail={operatorEmail}
+            displayAvatarUrl={operatorAvatarUrl}
+            uiSettings={operatorUiSettings}
+            onUiSettingsChange={setOperatorUiSettings}
+            onProfileSaved={(profile) => {
+              setOperatorName(profile.fullName || 'Operator');
+              setOperatorEmail(profile.email || '');
+              setOperatorAvatarUrl(profile.avatarUrl || '');
+            }}
             statusSnapshot={paymentSetupStatus}
             statusLoading={paymentSetupLoading}
             onStatusChanged={(nextStatus) => {
@@ -644,13 +758,13 @@ export default function OperatorDashboard() {
                 <p className="text-sm font-bold text-theme">{operatorName.split(' ')[0]}</p>
                 <p className="text-xs text-muted-theme">Operator</p>
               </div>
-              <img
+              <Image
                 src={operatorAvatarUrl?.trim() || '/images/profile.png'}
                 alt="Operator avatar"
+                width={36}
+                height={36}
                 className="w-9 h-9 rounded-xl object-cover"
-                onError={(e) => {
-                  e.currentTarget.src = '/images/profile.png';
-                }}
+                sizes="36px"
               />
             </div>
           </div>
@@ -703,7 +817,10 @@ export default function OperatorDashboard() {
           )}
           {renderContent()}
         </div>
-        <OperatorChatWidget accessToken={sessionToken} />
+        <OperatorChatWidget
+          accessToken={sessionToken}
+          soundEnabled={operatorUiSettings.chatUnreadSoundEnabled}
+        />
       </main>
     </div>
   );
@@ -750,7 +867,13 @@ function SidebarItem({ icon: Icon, label, active, collapsed, onClick }: {
   );
 }
 
-function OperatorChatWidget({ accessToken }: { accessToken: string }) {
+function OperatorChatWidget({
+  accessToken,
+  soundEnabled,
+}: {
+  accessToken: string;
+  soundEnabled: boolean;
+}) {
   const CHAT_RENDER_LIMIT = 160;
   const [chatOpen, setChatOpen] = useState(false);
   const [chatReservationId, setChatReservationId] = useState('');
@@ -1008,6 +1131,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   useEffect(() => {
     const prevCount = prevUnreadThreadCountRef.current;
     if (
+      soundEnabled &&
       unreadSoundReadyRef.current &&
       unreadThreadCount > prevCount
     ) {
@@ -1017,13 +1141,14 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     if (!unreadSoundReadyRef.current) {
       unreadSoundReadyRef.current = true;
     }
-  }, [unreadThreadCount]);
+  }, [unreadThreadCount, soundEnabled]);
 
   useEffect(() => {
     if (!accessToken) return;
     void loadUnreadCount(true);
     if (chatOpen) return;
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadUnreadCount(true);
     }, CHAT_UNREAD_REFRESH_MS);
     return () => {
@@ -1037,6 +1162,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     void loadReservations(false);
     void loadUnreadCount(true);
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadReservations(true);
       void loadUnreadCount(true);
     }, CHAT_LIST_REFRESH_MS);
@@ -1101,6 +1227,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   useEffect(() => {
     if (!chatOpen || !chatReservationId || !accessToken) return;
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadChat(chatReservationId, { silent: true });
     }, CHAT_THREAD_REFRESH_MS);
     return () => {
@@ -2033,7 +2160,7 @@ function ReservationsContent({
         viewReservation &&
         typeof document !== 'undefined' &&
         createPortal(
-          <div className="fixed inset-0 z-[250] flex items-center justify-center px-4">
+          <div className="fixed inset-0 z-[250] flex items-center justify-center px-4 py-4 overflow-y-auto">
             <button
               type="button"
               aria-label="Close reservation details"
@@ -2042,7 +2169,7 @@ function ReservationsContent({
               onClick={closeDetailsModal}
             />
             <div
-              className="relative w-full max-w-2xl rounded-2xl overflow-hidden"
+              className="relative w-full max-w-2xl max-h-[calc(100dvh-2rem)] rounded-2xl overflow-hidden flex flex-col my-auto"
               style={{
                 background: 'var(--tg-card)',
                 border: '1px solid var(--tg-border)',
@@ -2070,7 +2197,7 @@ function ReservationsContent({
                 </button>
               </div>
 
-              <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+              <div className="flex-1 min-h-0 overflow-y-auto p-5 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
                 <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
                   <p className="text-xs text-muted-theme uppercase mb-1">Contact</p>
                   <p className="text-theme font-semibold">{viewReservation.contact_number || '-'}</p>
@@ -2175,6 +2302,9 @@ function PassengersContent({
   const [mapCenter, setMapCenter] = useState<[number, number]>([10.9622, 124.6276]);
   const [mapMarker, setMapMarker] = useState<[number, number] | null>(null);
   const [mapReservation, setMapReservation] = useState<OperatorBoardingPassenger | null>(null);
+  const geocodeCacheRef = React.useRef(
+    new Map<string, { expiresAt: number; coords: [number, number] | null }>()
+  );
 
   const formatPeso = (value: number) =>
     `PHP ${Number(value || 0).toLocaleString('en-PH', {
@@ -2214,24 +2344,46 @@ function PassengersContent({
   const geocodeWithNominatim = async (
     query: string
   ): Promise<[number, number] | null> => {
+    const normalizedKey = query.trim().toLowerCase();
+    const now = Date.now();
+    const cached = geocodeCacheRef.current.get(normalizedKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.coords;
+    }
+
+    if (geocodeCacheRef.current.size > GEOCODE_CACHE_MAX_ENTRIES) {
+      geocodeCacheRef.current.clear();
+    }
+
     const q = encodeURIComponent(query);
     const response = await fetch(
       `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${q}&limit=5&countrycodes=ph&addressdetails=1`,
       {
-        cache: 'no-store',
         headers: {
           'Accept-Language': 'en',
         },
       }
     );
-    if (!response.ok) return null;
+    if (!response.ok) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
 
     const rows = (await response.json()) as Array<{
       lat?: string;
       lon?: string;
       display_name?: string;
     }>;
-    if (!Array.isArray(rows) || rows.length === 0) return null;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
 
     const preferred = rows.find((row) =>
       String(row.display_name || '')
@@ -2239,13 +2391,36 @@ function PassengersContent({
         .includes('leyte')
     );
     const winner = preferred || rows[0];
-    if (!winner?.lat || !winner?.lon) return null;
+    if (!winner?.lat || !winner?.lon) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
 
     const lat = Number(winner.lat);
     const lng = Number(winner.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
-    return [lat, lng];
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
+    const coords: [number, number] = [lat, lng];
+    geocodeCacheRef.current.set(normalizedKey, {
+      coords,
+      expiresAt: now + GEOCODE_CACHE_TTL_MS,
+    });
+    return coords;
   };
 
   const resolvePickupCoordinates = async (
@@ -2444,6 +2619,14 @@ function PassengersContent({
   };
 
   const handlePickedUp = async (row: OperatorBoardingPassenger) => {
+    const queueStatus = String(queueInfo?.status || '').toLowerCase();
+    if (queueStatus !== 'departed') {
+      sileoToast.warning({
+        title: 'Pickup locked',
+        description: 'Mark the van as departed first before marking passengers as picked up.',
+      });
+      return;
+    }
     try {
       setRowActionLoadingId(row.id);
       await updateOperatorReservationStatus({
@@ -2474,7 +2657,7 @@ function PassengersContent({
           <div>
             <h3 className="text-theme font-bold text-lg">Queue Passengers</h3>
             <p className="text-muted-theme text-sm">
-              Latest reservations for your current queued or boarding van
+              Latest reservations for your current departed, queued, or boarding van
             </p>
           </div>
           <button
@@ -2526,14 +2709,19 @@ function PassengersContent({
                 Showing reservations for this exact trip slot only.
               </p>
             )}
+            {String(queueInfo.status || '').toLowerCase() !== 'departed' && (
+              <p className="mt-2 text-xs" style={{ color: '#f59e0b' }}>
+                `Picked Up` will unlock after you mark this van as `Departed` in My Vehicle.
+              </p>
+            )}
           </>
         ) : (
-          <div
-            className="mt-4 p-4 rounded-xl text-sm"
-            style={{ background: 'rgba(245,158,11,0.12)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.35)' }}
-          >
-            You are not in queue yet. Set your queue status to Queued or Boarding in My Vehicle tab.
-          </div>
+            <div
+              className="mt-4 p-4 rounded-xl text-sm"
+              style={{ background: 'rgba(245,158,11,0.12)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.35)' }}
+            >
+              You are not in queue yet. Set your queue status to Queued or Boarding in My Vehicle tab.
+            </div>
         )}
       </div>
 
@@ -2569,13 +2757,13 @@ function PassengersContent({
               ) : !queueInfo ? (
                 <tr>
                   <td className="p-6 text-muted-theme" colSpan={5}>
-                    No active queued/boarding van.
+                    No active departed/queued/boarding van.
                   </td>
                 </tr>
               ) : passengers.length === 0 ? (
                 <tr>
                   <td className="p-6 text-muted-theme" colSpan={5}>
-                    No passengers yet for this queued/boarding trip.
+                    No passengers yet for this departed/queued/boarding trip.
                   </td>
                 </tr>
               ) : (
@@ -2622,7 +2810,10 @@ function PassengersContent({
                         <button
                           type="button"
                           onClick={() => void handlePickedUp(row)}
-                          disabled={rowActionLoadingId === row.id}
+                          disabled={
+                            rowActionLoadingId === row.id ||
+                            String(queueInfo?.status || '').toLowerCase() !== 'departed'
+                          }
                           className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
                           style={{
                             background: 'rgba(34,197,94,0.14)',
@@ -2630,7 +2821,12 @@ function PassengersContent({
                             border: '1px solid rgba(34,197,94,0.35)',
                           }}
                         >
-                          {rowActionLoadingId === row.id ? 'Saving...' : 'Picked Up'}
+                          {rowActionLoadingId === row.id
+                            ? 'Saving...'
+                            : String(queueInfo?.status || '').toLowerCase() ===
+                                'departed'
+                              ? 'Picked Up'
+                              : 'Depart First'}
                         </button>
                       </div>
                     </td>
@@ -2804,6 +3000,7 @@ function MyVehicleContent({
   const [seatMap, setSeatMap] = useState<OperatorSeatMapItem[]>([]);
   const [selectedSeatLabel, setSelectedSeatLabel] = useState('');
   const [walkInName, setWalkInName] = useState('');
+  const [walkInIsDiscounted, setWalkInIsDiscounted] = useState(false);
 
   const matchesCurrentOperator = useCallback(
     (row: QueueEntry) =>
@@ -2828,44 +3025,48 @@ function MyVehicleContent({
     [matchesCurrentOperator]
   );
 
-  const loadQueue = async (isManual = false) => {
-    try {
-      if (isManual) {
-        setRefreshing(true);
-      } else {
-        setQueueLoading(true);
+  const loadQueue = useCallback(
+    async (isManual = false) => {
+      try {
+        if (isManual) {
+          setRefreshing(true);
+        } else {
+          setQueueLoading(true);
+        }
+        const rows = await fetchActiveQueue();
+        setQueueRows(rows || []);
+        const mine = pickMyQueueEntry(rows || []);
+        if (mine) {
+          setRoute(mine.route || '');
+          setDriverName(mine.driver || '');
+          setPlateNumber(mine.plate || '');
+        }
+      } catch (err: any) {
+        sileoToast.error({
+          title: 'Queue load failed',
+          description: err?.message || 'Unable to fetch queue.',
+        });
+      } finally {
+        if (isManual) {
+          setRefreshing(false);
+        } else {
+          setQueueLoading(false);
+        }
       }
-      const rows = await fetchActiveQueue();
-      setQueueRows(rows || []);
-      const mine = pickMyQueueEntry(rows || []);
-      if (mine) {
-        setRoute(mine.route || '');
-        setDriverName(mine.driver || '');
-        setPlateNumber(mine.plate || '');
-      }
-    } catch (err: any) {
-      sileoToast.error({
-        title: 'Queue load failed',
-        description: err?.message || 'Unable to fetch queue.',
-      });
-    } finally {
-      if (isManual) {
-        setRefreshing(false);
-      } else {
-        setQueueLoading(false);
-      }
-    }
-  };
+    },
+    [pickMyQueueEntry]
+  );
 
   useEffect(() => {
     if (!operatorEmail && !operatorUserId) return;
     setDriverName(operatorName || '');
     void loadQueue();
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadQueue();
-    }, 300000);
+    }, MY_VEHICLE_QUEUE_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [operatorEmail, operatorName, operatorUserId, pickMyQueueEntry]);
+  }, [operatorEmail, operatorName, operatorUserId, loadQueue]);
 
   const myQueue = pickMyQueueEntry(queueRows);
   const inQueue = !!myQueue;
@@ -2959,6 +3160,7 @@ function MyVehicleContent({
           tripKey,
           seatLabel: selectedSeatLabel,
           passengerName: walkInName.trim(),
+          isDiscounted: walkInIsDiscounted,
           queueId: myQueue.id,
         }),
       });
@@ -2970,6 +3172,7 @@ function MyVehicleContent({
       setSeatMap((result?.seats || []) as OperatorSeatMapItem[]);
       setSelectedSeatLabel('');
       setWalkInName('');
+      setWalkInIsDiscounted(false);
       sileoToast.success({ title: 'Seat marked occupied' });
     } catch (err: any) {
       sileoToast.error({
@@ -3020,8 +3223,9 @@ function MyVehicleContent({
 
     void loadSeatMap(false);
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadSeatMap(false, true);
-    }, 15000);
+    }, MY_VEHICLE_SEATMAP_REFRESH_MS);
 
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3358,7 +3562,13 @@ function MyVehicleContent({
                     }
                     title={
                       seat?.passengerName
-                        ? `${seat.passengerName} (${seat.source === 'walk_in' ? 'walk-in' : 'reservation'})`
+                        ? `${seat.passengerName} (${
+                            seat.source === 'walk_in'
+                              ? seat.walkInDiscounted
+                                ? 'walk-in discounted'
+                                : 'walk-in regular'
+                              : 'reservation'
+                          })`
                         : `Seat ${label}`
                     }
                   >
@@ -3376,6 +3586,15 @@ function MyVehicleContent({
                 className="input-dark w-full"
                 disabled={seatActionLoading || seatMapLoading}
               />
+              <select
+                value={walkInIsDiscounted ? 'discounted' : 'regular'}
+                onChange={(e) => setWalkInIsDiscounted(e.target.value === 'discounted')}
+                disabled={seatActionLoading || seatMapLoading}
+                className="input-dark w-full md:w-56"
+              >
+                <option value="regular">Regular Fare</option>
+                <option value="discounted">Discounted Fare</option>
+              </select>
               <button
                 onClick={() => void markSeatAsWalkIn()}
                 disabled={!selectedSeatLabel || !walkInName.trim() || seatActionLoading || seatMapLoading}
@@ -3410,7 +3629,12 @@ function MyVehicleContent({
                           Seat {seat.seatLabel} - {seat.passengerName || 'Passenger'}
                         </p>
                         <p className="text-muted-theme text-xs uppercase">
-                          {seat.source === 'walk_in' ? 'walk-in' : 'online reservation'} | {seat.status}
+                          {seat.source === 'walk_in'
+                            ? seat.walkInDiscounted
+                              ? 'walk-in discounted'
+                              : 'walk-in regular'
+                            : 'online reservation'}{' '}
+                          | {seat.status}
                         </p>
                       </div>
                       {seat.source === 'walk_in' && (
@@ -3745,11 +3969,25 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
 
 function OperatorSettingsContent({
   accessToken,
+  operatorUserId,
+  displayName,
+  displayEmail,
+  displayAvatarUrl,
+  uiSettings,
+  onUiSettingsChange,
+  onProfileSaved,
   statusSnapshot,
   statusLoading,
   onStatusChanged,
 }: {
   accessToken: string;
+  operatorUserId: string;
+  displayName: string;
+  displayEmail: string;
+  displayAvatarUrl: string;
+  uiSettings: OperatorUiSettings;
+  onUiSettingsChange: (next: OperatorUiSettings) => void;
+  onProfileSaved: (nextProfile: OperatorProfileResult) => void;
   statusSnapshot: OperatorPaymentAccountStatusResult | null;
   statusLoading?: boolean;
   onStatusChanged: (nextStatus: OperatorPaymentAccountStatusResult) => void;
@@ -3764,6 +4002,13 @@ function OperatorSettingsContent({
   const [webhookSecret, setWebhookSecret] = useState('');
   const [showSecret, setShowSecret] = useState(false);
   const [showWebhook, setShowWebhook] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState('');
+  const [fullName, setFullName] = useState(displayName || '');
+  const [email, setEmail] = useState(displayEmail || '');
+  const [avatarUrl, setAvatarUrl] = useState(displayAvatarUrl || '');
+  const [contactNumber, setContactNumber] = useState('');
 
   const loadStatus = useCallback(
     async (silent = false) => {
@@ -3785,14 +4030,82 @@ function OperatorSettingsContent({
     [accessToken, onStatusChanged]
   );
 
+  const loadProfile = useCallback(
+    async (silent = false) => {
+      if (!accessToken || !operatorUserId) return;
+      try {
+        if (!silent) setProfileLoading(true);
+        setProfileError('');
+        const profile = await fetchOperatorProfile(accessToken);
+        setFullName(profile.fullName || '');
+        setEmail(profile.email || '');
+        setAvatarUrl(profile.avatarUrl || '');
+        setContactNumber(profile.contactNumber || '');
+      } catch (err: any) {
+        if (!silent) {
+          setProfileError(err?.message || 'Failed to load profile.');
+        }
+      } finally {
+        if (!silent) setProfileLoading(false);
+      }
+    },
+    [accessToken, operatorUserId]
+  );
+
   useEffect(() => {
     setStatus(statusSnapshot);
   }, [statusSnapshot]);
 
   useEffect(() => {
+    setFullName(displayName || '');
+    setEmail(displayEmail || '');
+    setAvatarUrl(displayAvatarUrl || '');
+  }, [displayName, displayEmail, displayAvatarUrl]);
+
+  useEffect(() => {
     if (statusSnapshot) return;
     void loadStatus(false);
   }, [statusSnapshot, loadStatus]);
+
+  useEffect(() => {
+    void loadProfile(false);
+  }, [loadProfile]);
+
+  const handleSaveProfile = async () => {
+    if (!fullName.trim()) {
+      setProfileError('Full name is required.');
+      return;
+    }
+
+    try {
+      setProfileSaving(true);
+      setProfileError('');
+      const profile = await saveOperatorProfile({
+        accessToken,
+        fullName: fullName.trim(),
+        avatarUrl: avatarUrl.trim(),
+        contactNumber: contactNumber.trim(),
+      });
+      setFullName(profile.fullName || '');
+      setEmail(profile.email || '');
+      setAvatarUrl(profile.avatarUrl || '');
+      setContactNumber(profile.contactNumber || '');
+      onProfileSaved(profile);
+      sileoToast.success({
+        title: 'Profile saved',
+        description: 'Your operator profile was updated successfully.',
+      });
+    } catch (err: any) {
+      const message = err?.message || 'Failed to save profile.';
+      setProfileError(message);
+      sileoToast.error({
+        title: 'Profile save failed',
+        description: message,
+      });
+    } finally {
+      setProfileSaving(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!secretKey.trim()) {
@@ -3833,6 +4146,156 @@ function OperatorSettingsContent({
 
   return (
     <div className="admin-tab space-y-6">
+      <div className="card-glow p-5 rounded-2xl">
+        <h3 className="text-theme font-bold text-lg">Operator Profile</h3>
+        <p className="text-sm text-muted-theme mt-1">
+          Keep your profile details updated for operator records.
+        </p>
+
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              Full Name
+            </label>
+            <Input
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              placeholder="Operator full name"
+              className="input-dark"
+              disabled={profileSaving || profileLoading}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              Contact Number
+            </label>
+            <Input
+              value={contactNumber}
+              onChange={(e) => setContactNumber(e.target.value)}
+              placeholder="+63..."
+              className="input-dark"
+              disabled={profileSaving || profileLoading}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              Email
+            </label>
+            <Input value={email} disabled className="input-dark opacity-70" />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              Avatar URL
+            </label>
+            <Input
+              value={avatarUrl}
+              onChange={(e) => setAvatarUrl(e.target.value)}
+              placeholder="https://... or /images/profile.png"
+              className="input-dark"
+              disabled={profileSaving || profileLoading}
+            />
+          </div>
+        </div>
+
+        {profileError && (
+          <p className="text-sm mt-3" style={{ color: '#ef4444' }}>
+            {profileError}
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSaveProfile}
+            disabled={profileSaving || profileLoading}
+            className="btn-primary text-sm px-4 py-2 disabled:opacity-60"
+          >
+            {profileSaving ? 'Saving...' : 'Save Profile'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadProfile(false)}
+            disabled={profileSaving || profileLoading}
+            className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
+            style={{
+              background: 'var(--tg-subtle)',
+              color: 'var(--primary)',
+              border: '1px solid var(--tg-border-primary)',
+            }}
+          >
+            Refresh Profile
+          </button>
+        </div>
+      </div>
+
+      <div className="card-glow p-5 rounded-2xl">
+        <h3 className="text-theme font-bold text-lg">Notification Preferences</h3>
+        <p className="text-sm text-muted-theme mt-1">
+          Control dashboard notification behavior on this device.
+        </p>
+
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <button
+            type="button"
+            onClick={() =>
+              onUiSettingsChange({
+                ...uiSettings,
+                dashboardNotificationSoundEnabled:
+                  !uiSettings.dashboardNotificationSoundEnabled,
+              })
+            }
+            className="rounded-xl p-3 text-left transition cursor-pointer"
+            style={{
+              background: 'var(--tg-bg-alt)',
+              border: '1px solid var(--tg-border)',
+            }}
+          >
+            <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+              Dashboard Notification Sound
+            </p>
+            <p
+              className="text-sm font-semibold"
+              style={{
+                color: uiSettings.dashboardNotificationSoundEnabled
+                  ? '#22c55e'
+                  : '#ef4444',
+              }}
+            >
+              {uiSettings.dashboardNotificationSoundEnabled
+                ? 'Enabled'
+                : 'Disabled'}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              onUiSettingsChange({
+                ...uiSettings,
+                chatUnreadSoundEnabled: !uiSettings.chatUnreadSoundEnabled,
+              })
+            }
+            className="rounded-xl p-3 text-left transition cursor-pointer"
+            style={{
+              background: 'var(--tg-bg-alt)',
+              border: '1px solid var(--tg-border)',
+            }}
+          >
+            <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+              Unread Chat Sound
+            </p>
+            <p
+              className="text-sm font-semibold"
+              style={{
+                color: uiSettings.chatUnreadSoundEnabled ? '#22c55e' : '#ef4444',
+              }}
+            >
+              {uiSettings.chatUnreadSoundEnabled ? 'Enabled' : 'Disabled'}
+            </p>
+          </button>
+        </div>
+      </div>
+
       <div className="card-glow p-5 rounded-2xl">
         <h3 className="text-theme font-bold text-lg">Payout Setup Status</h3>
         <p className="text-sm text-muted-theme mt-1">

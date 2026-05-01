@@ -5,6 +5,7 @@ export type RouteFareRow = {
   origin: string;
   destination: string;
   vehicle_type: string;
+  vehicle_image_url?: string | null;
   regular_fare: number;
   discount_rate: number;
   distance_km: number | null;
@@ -39,31 +40,102 @@ export type RouteMetricPayload = {
   travel_time_minutes?: number | null;
 };
 
+const ROUTE_FARES_CACHE_TTL_MS = 45 * 1000;
+const ROUTE_METRICS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+type CachedRouteFares = {
+  expiresAt: number;
+  data: { rows: RouteFareRow[] };
+};
+
+type CachedRouteMetrics = {
+  expiresAt: number;
+  data: RouteMetricsResponse;
+};
+
+const routeFaresCache = new Map<string, CachedRouteFares>();
+const routeFaresInflight = new Map<string, Promise<{ rows: RouteFareRow[] }>>();
+const routeMetricsCache = new Map<string, CachedRouteMetrics>();
+
+const routeMetricsCacheKey = (routes: RouteMetricPayload[]) =>
+  routes
+    .map((route) => ({
+      origin: String(route.origin || '').trim().toLowerCase(),
+      destination: String(route.destination || '').trim().toLowerCase(),
+      vehicle_type: String(route.vehicle_type || '').trim().toLowerCase(),
+      distance_km: Number(route.distance_km || 0),
+    }))
+    .sort((a, b) =>
+      `${a.origin}|${a.destination}|${a.vehicle_type}`.localeCompare(
+        `${b.origin}|${b.destination}|${b.vehicle_type}`
+      )
+    )
+    .map((route) =>
+      `${route.origin}|${route.destination}|${route.vehicle_type}|${route.distance_km}`
+    )
+    .join('||');
+
 export const fetchRouteFares = async (url: string) => {
-  const res = await fetch(url, { cache: 'no-store' });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data?.error || 'Failed to fetch route fares.');
+  const now = Date.now();
+  const cached = routeFaresCache.get(url);
+  if (cached && cached.expiresAt > now) {
+    return cached.data;
   }
-  return data as { rows: RouteFareRow[] };
+
+  const inflight = routeFaresInflight.get(url);
+  if (inflight) return inflight;
+
+  const request = (async () => {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to fetch route fares.');
+    }
+    const payload = data as { rows: RouteFareRow[] };
+    routeFaresCache.set(url, {
+      data: payload,
+      expiresAt: Date.now() + ROUTE_FARES_CACHE_TTL_MS,
+    });
+    return payload;
+  })();
+
+  routeFaresInflight.set(url, request);
+  try {
+    return await request;
+  } finally {
+    routeFaresInflight.delete(url);
+  }
 };
 
 export const fetchRouteMetrics = async (
   routes: RouteMetricPayload[],
   signal?: AbortSignal
 ) => {
+  const cacheKey = routeMetricsCacheKey(routes);
+  const cached = routeMetricsCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
+
   const res = await fetch('/api/public/route-metrics', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ routes }),
-    cache: 'no-store',
     signal,
   });
   const data = await res.json();
   if (!res.ok) {
     throw new Error(data?.error || 'Failed to fetch route metrics.');
   }
-  return data as RouteMetricsResponse;
+
+  const payload = data as RouteMetricsResponse;
+  if (routes.length <= 12) {
+    routeMetricsCache.set(cacheKey, {
+      data: payload,
+      expiresAt: Date.now() + ROUTE_METRICS_CACHE_TTL_MS,
+    });
+  }
+  return payload;
 };
 
 export const normalizeRouteKey = (
@@ -92,11 +164,28 @@ export const filterRowsByInputs = (
   origin: string,
   destination: string
 ) => {
+  const normalizedOrigin = normalizeText(origin);
+  const normalizedDestination = normalizeText(destination);
+
   return rows.filter((r) => {
     const vehicleOk = vehicle === 'all' || r.vehicle_type === vehicle;
     const originOk = matchesFilter(r.origin, origin);
     const destinationOk = matchesFilter(r.destination, destination);
-    return vehicleOk && originOk && destinationOk;
+    if (vehicleOk && originOk && destinationOk) return true;
+
+    // Allow reverse lookup only for barangay fares:
+    // e.g. Origin=Matlang, Destination=Isabel should match
+    // stored row Origin=Isabel, Destination=Matlang.
+    if (!vehicleOk) return false;
+    if (r.source !== 'barangay_fare') return false;
+    if (!normalizedOrigin) return false;
+    if (
+      normalizedDestination &&
+      normalizeText(r.origin) !== normalizedDestination
+    ) {
+      return false;
+    }
+    return normalizeText(r.destination) === normalizedOrigin;
   });
 };
 
@@ -191,4 +280,3 @@ export const formatTravelTime = (totalMinutes: number) => {
   if (mins === 0) return `${hours}h`;
   return `${hours}h ${mins}m`;
 };
-

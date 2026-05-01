@@ -142,6 +142,14 @@ export interface OperatorPaymentAccountStatusResult {
   maskedSecretKey: string | null;
 }
 
+export interface OperatorProfileResult {
+  fullName: string;
+  email: string;
+  avatarUrl: string;
+  contactNumber: string;
+  applicationStatus: 'pending' | 'approved' | 'rejected' | null;
+}
+
 export async function fetchOperatorPaymentHistory(
   accessToken: string,
   options?: { page?: number; pageSize?: number }
@@ -353,6 +361,40 @@ export async function saveOperatorPaymentAccount(input: {
     {
       paymongoSecretKey: input.paymongoSecretKey,
       paymongoWebhookSecret: input.paymongoWebhookSecret || '',
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+      },
+    }
+  );
+  return data;
+}
+
+export async function fetchOperatorProfile(
+  accessToken: string
+): Promise<OperatorProfileResult> {
+  const { data } = await http.get<OperatorProfileResult>('/api/operator/profile', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Cache-Control': 'no-store',
+    },
+  });
+  return data;
+}
+
+export async function saveOperatorProfile(input: {
+  accessToken: string;
+  fullName: string;
+  avatarUrl?: string;
+  contactNumber?: string;
+}): Promise<OperatorProfileResult> {
+  const { data } = await http.put<OperatorProfileResult>(
+    '/api/operator/profile',
+    {
+      fullName: input.fullName,
+      avatarUrl: input.avatarUrl || '',
+      contactNumber: input.contactNumber || '',
     },
     {
       headers: {

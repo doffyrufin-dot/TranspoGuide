@@ -60,26 +60,52 @@ export function useRouteSearch() {
   }, [rows]);
 
   const origins = useMemo(() => {
-    return Array.from(
-      new Set(
-        rows
-          .filter((r) => vehicle === 'all' || r.vehicle_type === vehicle)
-          .map((r) => r.origin)
-          .filter(Boolean)
+    const values = new Set(
+      rows
+        .filter((r) => vehicle === 'all' || r.vehicle_type === vehicle)
+        .map((r) => r.origin)
+        .filter(Boolean)
+    );
+
+    // Support swapped barangay search where barangay becomes origin.
+    rows
+      .filter(
+        (r) =>
+          r.source === 'barangay_fare' &&
+          (vehicle === 'all' || r.vehicle_type === vehicle)
       )
-    ).sort((a, b) => a.localeCompare(b));
-  }, [rows, vehicle]);
+      .forEach((r) => {
+        if (r.destination) values.add(r.destination);
+      });
+
+    if (origin.trim()) values.add(origin.trim());
+
+    return Array.from(values).sort((a, b) => a.localeCompare(b));
+  }, [rows, vehicle, origin]);
 
   const destinations = useMemo(() => {
-    return Array.from(
-      new Set(
-        rows
-          .filter((r) => vehicle === 'all' || r.vehicle_type === vehicle)
-          .map((r) => r.destination)
-          .filter(Boolean)
+    const values = new Set(
+      rows
+        .filter((r) => vehicle === 'all' || r.vehicle_type === vehicle)
+        .map((r) => r.destination)
+        .filter(Boolean)
+    );
+
+    // Allow picking base city destination when swapped from barangay origin.
+    rows
+      .filter(
+        (r) =>
+          r.source === 'barangay_fare' &&
+          (vehicle === 'all' || r.vehicle_type === vehicle)
       )
-    ).sort((a, b) => a.localeCompare(b));
-  }, [rows, vehicle]);
+      .forEach((r) => {
+        if (r.origin) values.add(r.origin);
+      });
+
+    if (destination.trim()) values.add(destination.trim());
+
+    return Array.from(values).sort((a, b) => a.localeCompare(b));
+  }, [rows, vehicle, destination]);
 
   const filteredRows = useMemo(() => {
     if (!appliedFilters) return [];
@@ -122,7 +148,6 @@ export function useRouteSearch() {
       if (destinationOnlyRows.length > 0) {
         nextFilters = { vehicle, origin: '', destination };
         selectedRows = destinationOnlyRows;
-        setOrigin('');
       }
     }
 
@@ -205,4 +230,3 @@ export function useRouteSearch() {
     handleSearch,
   };
 }
-
