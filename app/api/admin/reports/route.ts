@@ -12,7 +12,6 @@ type ReservationRow = {
   contact_number: string;
   pickup_location: string;
   route: string;
-  seat_labels: string[] | null;
   seat_count: number | null;
   amount_due: number | null;
   status: string | null;
@@ -190,7 +189,7 @@ export async function GET(req: NextRequest) {
       supabase
         .from('tbl_reservations')
         .select(
-          'id, full_name, contact_number, pickup_location, route, seat_labels, seat_count, amount_due, status, payment_id, paid_at, created_at, operator_user_id, queue_id'
+          'id, full_name, contact_number, pickup_location, route, seat_count, amount_due, status, payment_id, paid_at, created_at, operator_user_id, queue_id'
         )
         .gte('created_at', fromIso)
         .lte('created_at', toIso)
@@ -223,8 +222,11 @@ export async function GET(req: NextRequest) {
     const operatorIds = Array.from(
       new Set(reservations.map((row) => row.operator_user_id).filter(Boolean))
     ) as string[];
+    const reservationIds = Array.from(
+      new Set(reservations.map((row) => row.id).filter(Boolean))
+    ) as string[];
 
-    const [queueRes, userRes] = await Promise.all([
+    const [queueRes, userRes, seatRes] = await Promise.all([
       queueIds.length
         ? supabase
             .from('tbl_van_queue')
@@ -237,6 +239,14 @@ export async function GET(req: NextRequest) {
             .select('user_id, full_name, email')
             .in('user_id', operatorIds)
         : Promise.resolve({ data: [], error: null } as any),
+      reservationIds.length
+        ? supabase
+            .from('tbl_reservation_seats')
+            .select('reservation_id, seat_label, created_at')
+            .in('reservation_id', reservationIds)
+            .order('created_at', { ascending: true })
+            .order('seat_label', { ascending: true })
+        : Promise.resolve({ data: [], error: null } as any),
     ]);
 
     if (queueRes.error) {
@@ -244,6 +254,9 @@ export async function GET(req: NextRequest) {
     }
     if (userRes.error) {
       throw new Error(userRes.error.message || 'Failed to load operator metadata.');
+    }
+    if (seatRes.error) {
+      throw new Error(seatRes.error.message || 'Failed to load seat metadata.');
     }
 
     const queueMap = new Map<string, QueueMeta>(
@@ -264,12 +277,22 @@ export async function GET(req: NextRequest) {
         },
       ])
     );
+    const seatMap = new Map<string, string[]>();
+    (seatRes.data || []).forEach((row: any) => {
+      const reservationId = String(row.reservation_id || '').trim();
+      const seatLabel = String(row.seat_label || '').trim();
+      if (!reservationId || !seatLabel) return;
+      const current = seatMap.get(reservationId) || [];
+      if (!current.includes(seatLabel)) current.push(seatLabel);
+      seatMap.set(reservationId, current);
+    });
 
     const bookingRows = reservations.map((row) => {
       const queue = row.queue_id ? queueMap.get(row.queue_id) : undefined;
       const operator = row.operator_user_id
         ? userMap.get(row.operator_user_id)
         : undefined;
+      const seatLabels = seatMap.get(row.id) || [];
       return {
         reservation_id: row.id,
         reservation_code: `#${row.id.slice(0, 8)}`,
@@ -277,8 +300,8 @@ export async function GET(req: NextRequest) {
         contact_number: row.contact_number || '',
         pickup_location: row.pickup_location || '',
         route: row.route || '',
-        seat_labels: row.seat_labels || [],
-        seat_count: Number(row.seat_count || 0),
+        seat_labels: seatLabels,
+        seat_count: Number(row.seat_count || 0) || seatLabels.length,
         amount_due: Number(row.amount_due || 0),
         status: row.status || 'pending_payment',
         payment_id: row.payment_id || null,

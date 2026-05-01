@@ -60,7 +60,7 @@ const getAverageSpeedKph = (vehicleType: string) => {
   if (key.includes('van')) return 50;
   if (key.includes('jeep')) return 35;
   if (key.includes('multi')) return 32;
-  if (key.includes('trycicle') || key.includes('tricycle')) return 25;
+  if (key.includes('tricycle')) return 25;
   return 35;
 };
 
@@ -69,7 +69,7 @@ const inferDistanceFromFare = (vehicleType: string, regularFare: number) => {
   const fare = Number(regularFare || 0);
   if (fare <= 0) return 0;
 
-  if (key.includes('trycicle') || key.includes('tricycle')) {
+  if (key.includes('tricycle')) {
     // Barangay formula in setup: base 15 + 2 per km
     const inferred = (fare - 15) / 2;
     return Number.isFinite(inferred) ? Math.max(1, inferred) : 0;

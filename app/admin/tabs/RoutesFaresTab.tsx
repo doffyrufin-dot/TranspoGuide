@@ -38,9 +38,13 @@ type BarangayFareRow = {
   is_highway: boolean;
   is_active: boolean;
 };
+type BarangayVehicleTypeRow = {
+  barangay_fare_id: string;
+  vehicle_type_id: string;
+};
 
-const ALLOWED_VEHICLE_TYPES = ['Van', 'Bus', 'Minibus', 'Jeep', 'Multicab', 'Trycicle'] as const;
-const HIGHWAY_OPTIONS = ['Bus', 'Minibus', 'Multicab', 'Trycicle'] as const;
+const ALLOWED_VEHICLE_TYPES = ['Van', 'Bus', 'Minibus', 'Jeep', 'Multicab', 'Tricycle'] as const;
+const HIGHWAY_OPTIONS = ['Bus', 'Minibus', 'Multicab', 'Tricycle'] as const;
 const formatMoney = (value: number) => `P${Number(value || 0).toFixed(2)}`;
 const getAverageSpeedKph = (vehicleType: string) => {
   const key = (vehicleType || '').toLowerCase();
@@ -49,7 +53,7 @@ const getAverageSpeedKph = (vehicleType: string) => {
   if (key.includes('van')) return 50;
   if (key.includes('jeep')) return 35;
   if (key.includes('multi')) return 32;
-  if (key.includes('trycicle') || key.includes('tricycle')) return 25;
+  if (key.includes('tricycle')) return 25;
   return 35;
 };
 const computeTravelMinutes = (distanceKm: number, vehicleType: string) => {
@@ -101,7 +105,7 @@ export default function RoutesFaresTab() {
     tricycle_base_fare: '15',
     per_km_increase: '2',
     is_highway: true,
-    allowed_vehicle_types: ['Bus', 'Minibus', 'Multicab', 'Trycicle'] as string[],
+    allowed_vehicle_types: ['Bus', 'Minibus', 'Multicab', 'Tricycle'] as string[],
   });
 
   const destinationVehicleMap = useMemo(() => {
@@ -146,7 +150,7 @@ export default function RoutesFaresTab() {
         supabase
           .from('tbl_barangay_fares')
           .select(
-            'id, barangay_name, distance_km, tricycle_base_fare, per_km_increase, allowed_vehicle_types, is_highway, is_active'
+            'id, barangay_name, distance_km, tricycle_base_fare, per_km_increase, is_highway, is_active'
           )
           .eq('is_active', true)
           .order('barangay_name', { ascending: true }),
@@ -157,8 +161,61 @@ export default function RoutesFaresTab() {
         ...item,
         vehicle: Array.isArray(item.vehicle) ? item.vehicle[0] || null : item.vehicle || null,
       }));
+      const barangayBaseRows = (barangayRes.data || []) as Array<{
+        id: string;
+        barangay_name: string;
+        distance_km: number;
+        tricycle_base_fare: number;
+        per_km_increase: number;
+        is_highway: boolean;
+        is_active: boolean;
+      }>;
+      const barangayIds = barangayBaseRows.map((row) => row.id).filter(Boolean);
+      const { data: barangayVehicleData, error: barangayVehicleError } = barangayIds.length
+        ? await supabase
+            .from('tbl_barangay_vehicle_types')
+            .select('barangay_fare_id, vehicle_type_id')
+            .in('barangay_fare_id', barangayIds)
+        : { data: [], error: null as any };
+      if (barangayVehicleError) throw barangayVehicleError;
+
+      const vehicleTypeIds = Array.from(
+        new Set(
+          ((barangayVehicleData || []) as BarangayVehicleTypeRow[])
+            .map((row) => row.vehicle_type_id)
+            .filter(Boolean)
+        )
+      );
+      const { data: mappedVehicleTypes, error: mappedVehicleTypesError } = vehicleTypeIds.length
+        ? await supabase
+            .from('tbl_vehicle_types')
+            .select('id, name')
+            .in('id', vehicleTypeIds)
+        : { data: [], error: null as any };
+      if (mappedVehicleTypesError) throw mappedVehicleTypesError;
+
+      const vehicleNameById = new Map<string, string>(
+        ((mappedVehicleTypes || []) as Array<{ id: string; name: string }>).map((row) => [
+          row.id,
+          row.name,
+        ])
+      );
+      const mappedVehicleNamesByBarangay = new Map<string, string[]>();
+      ((barangayVehicleData || []) as BarangayVehicleTypeRow[]).forEach((row) => {
+        const vehicleName = vehicleNameById.get(row.vehicle_type_id);
+        if (!vehicleName) return;
+        const current = mappedVehicleNamesByBarangay.get(row.barangay_fare_id) || [];
+        if (!current.includes(vehicleName)) current.push(vehicleName);
+        mappedVehicleNamesByBarangay.set(row.barangay_fare_id, current);
+      });
+
       setRouteRows(normalizedRoutes as RouteFareRow[]);
-      setBarangayRows((barangayRes.data || []) as BarangayFareRow[]);
+      setBarangayRows(
+        barangayBaseRows.map((row) => ({
+          ...row,
+          allowed_vehicle_types: mappedVehicleNamesByBarangay.get(row.id) || [],
+        }))
+      );
     } catch (error: any) {
       sileoToast.error({ title: 'Load failed', description: error?.message || 'Unable to load routes/fares.' });
     } finally {
@@ -269,23 +326,57 @@ export default function RoutesFaresTab() {
 
     setBarangaySaving(true);
     try {
-      const { error } = await supabase.from('tbl_barangay_fares').insert({
+      const { data: insertedBarangayRows, error } = await supabase.from('tbl_barangay_fares').insert({
         barangay_name: name,
         distance_km: distance,
         tricycle_base_fare: base,
         per_km_increase: perKm,
         is_highway: barangayForm.is_highway,
-        allowed_vehicle_types: barangayForm.is_highway ? barangayForm.allowed_vehicle_types : [],
         is_active: true,
-      });
+      }).select('id').limit(1);
       if (error) throw error;
+      const insertedBarangayId = insertedBarangayRows?.[0]?.id as string | undefined;
+      if (!insertedBarangayId) throw new Error('Failed to create barangay fare.');
+
+      if (barangayForm.is_highway) {
+        const normalizedSelections = Array.from(
+          new Set(
+            barangayForm.allowed_vehicle_types
+              .map((v) => String(v || '').trim())
+              .filter(Boolean)
+          )
+        );
+        const selectedVehicleIds = normalizedSelections
+          .map((nameValue) => {
+            const normalizedName = nameValue.toLowerCase();
+            const exactMatch = vehicleTypes.find(
+              (item) => item.name.trim().toLowerCase() === normalizedName
+            );
+            if (exactMatch) return exactMatch.id;
+
+            return null;
+          })
+          .filter((id): id is string => !!id);
+
+        if (selectedVehicleIds.length > 0) {
+          const mapRows = selectedVehicleIds.map((vehicleTypeId) => ({
+            barangay_fare_id: insertedBarangayId,
+            vehicle_type_id: vehicleTypeId,
+          }));
+          const { error: mapInsertError } = await supabase
+            .from('tbl_barangay_vehicle_types')
+            .insert(mapRows);
+          if (mapInsertError) throw mapInsertError;
+        }
+      }
+
       setBarangayForm({
         barangay_name: '',
         distance_km: '',
         tricycle_base_fare: '15',
         per_km_increase: '2',
         is_highway: true,
-        allowed_vehicle_types: ['Bus', 'Minibus', 'Multicab', 'Trycicle'],
+        allowed_vehicle_types: ['Bus', 'Minibus', 'Multicab', 'Tricycle'],
       });
       sileoToast.success({ title: 'Barangay fare added' });
       await loadAll();

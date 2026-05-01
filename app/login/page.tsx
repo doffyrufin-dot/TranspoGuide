@@ -19,6 +19,7 @@ import {
   FaEye,
   FaEyeSlash,
 } from 'react-icons/fa';
+import Link from 'next/link';
 
 const normalizeBaseUrl = (value: string) => value.replace(/\/+$/, '');
 const toValidBaseUrl = (value: string) => {
@@ -597,9 +598,12 @@ const LoginPage = () => {
             >
               <FaRoute size={16} />
             </div>
-            <span className="text-xl font-bold text-white">
-              Transpo
-              <span style={{ color: 'var(--primary-light)' }}>Guide</span>
+            <span className="text-xl font-bold text-white cursor-pointer">
+              <Link href={'/'}>
+                {' '}
+                Transpo
+                <span style={{ color: 'var(--primary-light)' }}>Guide</span>
+              </Link>
             </span>
           </div>
           <h2 className="text-3xl font-extrabold text-white leading-tight mb-4">
@@ -639,7 +643,7 @@ const LoginPage = () => {
           </div>
         </div>
         <p className="relative text-white/30 text-xs">
-          Â© {new Date().getFullYear()} TranspoGuide
+          © {new Date().getFullYear()} TranspoGuide
         </p>
       </div>
 
@@ -647,7 +651,7 @@ const LoginPage = () => {
       <div className="flex-1 flex items-center justify-center px-6 py-20 login-anim-right">
         <div className="w-full max-w-md">
           <div className="lg:hidden text-center mb-8">
-            <span className="text-2xl font-bold text-theme">
+            <span className="text-2xl font-bold text-theme cursor-pointer">
               Transpo<span className="text-gradient">Guide</span>
             </span>
           </div>
@@ -869,4 +873,3 @@ const LoginPage = () => {
 };
 
 export default LoginPage;
-

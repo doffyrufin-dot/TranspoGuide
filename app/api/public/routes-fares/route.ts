@@ -37,7 +37,7 @@ export async function GET() {
     const { data: barangayRows, error: barangayError } = await supabase
       .from('tbl_barangay_fares')
       .select(
-        'id, barangay_name, distance_km, tricycle_base_fare, per_km_increase, is_highway, allowed_vehicle_types, is_active'
+        'id, barangay_name, distance_km, tricycle_base_fare, per_km_increase, is_highway, is_active'
       )
       .eq('is_active', true)
       .order('barangay_name', { ascending: true });
@@ -48,6 +48,55 @@ export async function GET() {
         { status: 400 }
       );
     }
+
+    const barangayIds = (barangayRows || [])
+      .map((row: any) => row.id)
+      .filter(Boolean);
+
+    const { data: barangayVehicleRows, error: barangayVehicleError } = barangayIds.length
+      ? await supabase
+          .from('tbl_barangay_vehicle_types')
+          .select('barangay_fare_id, vehicle_type_id')
+          .in('barangay_fare_id', barangayIds)
+      : { data: [], error: null as any };
+
+    if (barangayVehicleError) {
+      return NextResponse.json(
+        { error: barangayVehicleError.message || 'Failed to load barangay vehicle mapping.' },
+        { status: 400 }
+      );
+    }
+
+    const vehicleTypeIds = Array.from(
+      new Set((barangayVehicleRows || []).map((row: any) => row.vehicle_type_id).filter(Boolean))
+    );
+    const { data: vehicleRows, error: vehicleError } = vehicleTypeIds.length
+      ? await supabase
+          .from('tbl_vehicle_types')
+          .select('id, name')
+          .in('id', vehicleTypeIds)
+      : { data: [], error: null as any };
+
+    if (vehicleError) {
+      return NextResponse.json(
+        { error: vehicleError.message || 'Failed to load vehicle type names.' },
+        { status: 400 }
+      );
+    }
+
+    const vehicleNameById = new Map<string, string>(
+      (vehicleRows || []).map((row: any) => [String(row.id), String(row.name || '').trim()])
+    );
+    const vehicleNamesByBarangay = new Map<string, string[]>();
+    (barangayVehicleRows || []).forEach((row: any) => {
+      const barangayId = String(row.barangay_fare_id || '').trim();
+      const vehicleTypeId = String(row.vehicle_type_id || '').trim();
+      const vehicleName = vehicleNameById.get(vehicleTypeId) || '';
+      if (!barangayId || !vehicleName) return;
+      const current = vehicleNamesByBarangay.get(barangayId) || [];
+      if (!current.includes(vehicleName)) current.push(vehicleName);
+      vehicleNamesByBarangay.set(barangayId, current);
+    });
 
     const routeRows = (data || []).map((row: any) => ({
       id: row.id,
@@ -82,21 +131,19 @@ export async function GET() {
       const perKm = Number(row.per_km_increase || 0);
 
       const tricycleFare = base + distance * perKm;
-      const allowedVehicles = Array.isArray(row.allowed_vehicle_types)
-        ? (row.allowed_vehicle_types as string[])
-        : [];
+      const allowedVehicles = vehicleNamesByBarangay.get(String(row.id)) || [];
 
-      const fallbackHighwayVehicles = ['Bus', 'Minibus', 'Multicab', 'Trycicle'];
+      const fallbackHighwayVehicles = ['Bus', 'Minibus', 'Multicab', 'Tricycle'];
       const baseVehicles =
         allowedVehicles.length > 0
           ? allowedVehicles
           : row.is_highway
             ? fallbackHighwayVehicles
-            : ['Trycicle'];
+            : ['Tricycle'];
 
       const normalized = Array.from(
         new Set(
-          [...baseVehicles, 'Trycicle']
+          [...baseVehicles, 'Tricycle']
             .map((v) => String(v || '').trim())
             .filter(Boolean)
         )
@@ -111,7 +158,7 @@ export async function GET() {
           destination: row.barangay_name || '',
           vehicle_type: vehicleType,
           regular_fare:
-            vehicleKey.includes('trycicle') || vehicleKey.includes('tricycle')
+            vehicleKey.includes('tricycle')
               ? tricycleFare
               : Number(genericFare?.regular_fare || tricycleFare),
           discount_rate: Number(genericFare?.discount_rate || 0.2),

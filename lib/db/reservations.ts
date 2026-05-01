@@ -86,6 +86,52 @@ const cleanupExpiredLockedSeatRows = async (input: {
   }
 };
 
+const toUniqueSeatLabels = (values: unknown[]) =>
+  Array.from(
+    new Set(
+      values
+        .map((value) => String(value || '').trim())
+        .filter(Boolean)
+    )
+  );
+
+const loadSeatLabelsByReservationIds = async (
+  supabase: any,
+  reservationIds: string[]
+) => {
+  const ids = Array.from(new Set(reservationIds.map((id) => String(id || '').trim()))).filter(
+    Boolean
+  );
+  const seatMap = new Map<string, string[]>();
+  if (ids.length === 0) return seatMap;
+
+  const { data, error } = await supabase
+    .from('tbl_reservation_seats')
+    .select('reservation_id, seat_label, created_at')
+    .in('reservation_id', ids)
+    .order('created_at', { ascending: true })
+    .order('seat_label', { ascending: true });
+
+  if (error) {
+    throw new Error(error.message || 'Failed to load reservation seat labels.');
+  }
+
+  for (const row of data || []) {
+    const reservationId = String((row as any).reservation_id || '').trim();
+    const seatLabel = String((row as any).seat_label || '').trim();
+    if (!reservationId || !seatLabel) continue;
+    const current = seatMap.get(reservationId) || [];
+    current.push(seatLabel);
+    seatMap.set(reservationId, current);
+  }
+
+  for (const [reservationId, labels] of seatMap.entries()) {
+    seatMap.set(reservationId, toUniqueSeatLabels(labels));
+  }
+
+  return seatMap;
+};
+
 export async function createReservationIntent(input: CreateReservationIntentInput) {
   const supabase = getServiceClient();
   const seatLabels = Array.from(
@@ -164,7 +210,6 @@ export async function createReservationIntent(input: CreateReservationIntentInpu
       contact_number: input.contactNumber,
       pickup_location: input.pickupLocation,
       route: input.route,
-      seat_labels: seatLabels,
       seat_count: seatLabels.length,
       amount_due: input.amount,
       status: 'pending_payment',
@@ -183,6 +228,19 @@ export async function createReservationIntent(input: CreateReservationIntentInpu
 
   const reservationId = reservationRows[0].id as string;
   const guestToken = (reservationRows[0] as any).guest_token as string;
+  const seatRows = seatLabels.map((seatLabel) => ({
+    reservation_id: reservationId,
+    seat_label: seatLabel,
+  }));
+  const { error: seatInsertError } = await supabase
+    .from('tbl_reservation_seats')
+    .insert(seatRows);
+
+  if (seatInsertError) {
+    await supabase.from('tbl_reservations').delete().eq('id', reservationId);
+    throw new Error(seatInsertError.message || 'Failed to save selected seats.');
+  }
+
   const expiresAt = lockExpiresAtIso();
   const lockRows = seatLabels.map((seatLabel) => ({
     reservation_id: reservationId,
@@ -218,7 +276,7 @@ export async function getReservationById(reservationId: string, guestToken?: str
   const { data: reservationRows, error } = await supabase
     .from('tbl_reservations')
     .select(
-      'id, full_name, passenger_email, contact_number, pickup_location, route, seat_labels, seat_count, amount_due, status, payment_id, paid_at, created_at, operator_user_id, queue_id, guest_token, updated_at'
+      'id, full_name, passenger_email, contact_number, pickup_location, route, seat_count, amount_due, status, payment_id, paid_at, created_at, operator_user_id, queue_id, guest_token, updated_at'
     )
     .eq('id', reservationId)
     .limit(1);
@@ -227,6 +285,16 @@ export async function getReservationById(reservationId: string, guestToken?: str
   const reservation = reservationRows?.[0];
   if (!reservation) return null;
   if (guestToken && reservation.guest_token !== guestToken) return null;
+  const seatMap = await loadSeatLabelsByReservationIds(supabase, [reservation.id]);
+  const seatLabels = seatMap.get(reservation.id) || [];
+  const reservationWithSeats = {
+    ...reservation,
+    seat_labels: seatLabels,
+    seat_count:
+      Number.isFinite(Number(reservation.seat_count)) && Number(reservation.seat_count) > 0
+        ? Number(reservation.seat_count)
+        : seatLabels.length,
+  };
 
   let operator: { name: string; email: string } | null = null;
   if (reservation.operator_user_id) {
@@ -244,7 +312,7 @@ export async function getReservationById(reservationId: string, guestToken?: str
     }
   }
 
-  return { reservation, operator };
+  return { reservation: reservationWithSeats, operator };
 }
 
 export async function getReservationMessages(reservationId: string) {
@@ -542,7 +610,7 @@ export async function markReservationsDepartedForQueue(input: {
 
   const { data: rows, error: readError } = await supabase
     .from('tbl_reservations')
-    .select('id, full_name, passenger_email, route, seat_labels, seat_count')
+    .select('id, full_name, passenger_email, route, seat_count')
     .eq('queue_id', input.queueId)
     .eq('operator_user_id', input.operatorUserId)
     .in('status', ['confirmed', 'pending_operator_approval', 'paid']);
@@ -556,14 +624,29 @@ export async function markReservationsDepartedForQueue(input: {
     full_name: string | null;
     passenger_email: string | null;
     route: string | null;
-    seat_labels: string[] | null;
     seat_count: number | null;
   }>;
   if (reservations.length === 0) {
     return { updatedCount: 0, reservations: [] };
   }
 
-  const reservationIds = reservations.map((row) => row.id).filter(Boolean);
+  const seatMap = await loadSeatLabelsByReservationIds(
+    supabase,
+    reservations.map((row) => row.id)
+  );
+  const reservationsWithSeats = reservations.map((row) => {
+    const seatLabels = seatMap.get(row.id) || [];
+    return {
+      ...row,
+      seat_labels: seatLabels,
+      seat_count:
+        Number.isFinite(Number(row.seat_count)) && Number(row.seat_count) > 0
+          ? Number(row.seat_count)
+          : seatLabels.length,
+    };
+  });
+
+  const reservationIds = reservationsWithSeats.map((row) => row.id).filter(Boolean);
   let departedStatusSaved = false;
 
   const { error: departedUpdateError } = await supabase
@@ -605,7 +688,7 @@ export async function markReservationsDepartedForQueue(input: {
   }
 
   const senderName = (input.senderName || '').trim() || 'Operator';
-  const autoMessages = reservations.map((reservation) => ({
+  const autoMessages = reservationsWithSeats.map((reservation) => ({
     id: buildAutoDepartedMessageId(reservation.id),
     reservation_id: reservation.id,
     sender_type: 'operator' as const,
@@ -624,8 +707,8 @@ export async function markReservationsDepartedForQueue(input: {
   }
 
   return {
-    updatedCount: reservations.length,
-    reservations,
+    updatedCount: reservationsWithSeats.length,
+    reservations: reservationsWithSeats,
     departedStatusSaved,
   };
 }
@@ -651,7 +734,7 @@ export async function updateReservationStatusByOperator(input: {
     .eq('operator_user_id', input.operatorUserId)
     .in('status', allowedCurrentStatuses)
     .select(
-      'id, status, full_name, passenger_email, route, seat_labels, seat_count, operator_user_id, queue_id'
+      'id, status, full_name, passenger_email, route, seat_count, operator_user_id, queue_id'
     )
     .limit(1);
 
@@ -692,7 +775,18 @@ export async function updateReservationStatusByOperator(input: {
     }
   }
 
-  return rows[0];
+  const updatedRow = rows[0];
+  const seatMap = await loadSeatLabelsByReservationIds(supabase, [updatedRow.id]);
+  const seatLabels = seatMap.get(updatedRow.id) || [];
+
+  return {
+    ...updatedRow,
+    seat_labels: seatLabels,
+    seat_count:
+      Number.isFinite(Number(updatedRow.seat_count)) && Number(updatedRow.seat_count) > 0
+        ? Number(updatedRow.seat_count)
+        : seatLabels.length,
+  };
 }
 
 export async function releaseReservationLocks(reservationId: string) {
@@ -953,7 +1047,6 @@ export async function assignWalkInSeat(input: {
       contact_number: 'WALK-IN',
       pickup_location: 'WALK_IN',
       route: input.route,
-      seat_labels: [seatLabel],
       seat_count: 1,
       amount_due: 0,
       status: 'confirmed',
@@ -974,6 +1067,17 @@ export async function assignWalkInSeat(input: {
   }
 
   const reservationId = reservationRows[0].id as string;
+  const { error: seatInsertError } = await supabase
+    .from('tbl_reservation_seats')
+    .insert({
+      reservation_id: reservationId,
+      seat_label: seatLabel,
+    });
+
+  if (seatInsertError) {
+    await supabase.from('tbl_reservations').delete().eq('id', reservationId);
+    throw new Error(seatInsertError.message || 'Failed to save walk-in seat.');
+  }
 
   const { error: lockInsertError } = await supabase.from('tbl_seat_locks').insert({
     reservation_id: reservationId,

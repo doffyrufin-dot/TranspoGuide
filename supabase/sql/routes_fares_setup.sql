@@ -474,7 +474,7 @@ values
   ('Minibus', null, true),
   ('Jeep', null, true),
   ('Multicab', null, true),
-  ('Trycicle', null, true)
+  ('Tricycle', null, true)
 on conflict (name) do update
 set is_active = true,
     updated_at = now();
@@ -497,7 +497,7 @@ join public.tbl_vehicle_types v on (
   (d.destination = 'Ormoc City' and v.name in ('Van', 'Bus', 'Minibus', 'Jeep', 'Multicab')) or
   (d.destination = 'Palompon' and v.name in ('Van', 'Bus', 'Minibus', 'Jeep', 'Multicab')) or
   (d.destination = 'Merida' and v.name in ('Van', 'Bus', 'Minibus', 'Jeep', 'Multicab')) or
-  (d.destination = 'Barangays (Isabel)' and v.name in ('Jeep', 'Multicab', 'Trycicle'))
+  (d.destination = 'Barangays (Isabel)' and v.name in ('Jeep', 'Multicab', 'Tricycle'))
 )
 on conflict (destination_id, vehicle_type_id) do nothing;
 
@@ -511,13 +511,13 @@ insert into public.tbl_barangay_fares (
   is_active
 )
 values
-  ('Libertad', 3, 15, 2, '{"Bus","Minibus","Multicab","Trycicle"}', true, true),
-  ('Pingag', 5, 15, 2, '{"Bus","Minibus","Multicab","Trycicle"}', true, true),
-  ('Matlang', 7, 15, 2, '{"Bus","Minibus","Multicab","Trycicle"}', true, true),
-  ('Bilwang', 9, 15, 2, '{"Bus","Minibus","Multicab","Trycicle"}', true, true),
-  ('Tubod', 11, 15, 2, '{"Bus","Minibus","Multicab","Trycicle"}', true, true),
-  ('Tolingon', 13, 15, 2, '{"Bus","Minibus","Multicab","Trycicle"}', true, true),
-  ('Apale', 15, 15, 2, '{"Bus","Minibus","Multicab","Trycicle"}', true, true)
+  ('Libertad', 3, 15, 2, '{"Bus","Minibus","Multicab","Tricycle"}', true, true),
+  ('Pingag', 5, 15, 2, '{"Bus","Minibus","Multicab","Tricycle"}', true, true),
+  ('Matlang', 7, 15, 2, '{"Bus","Minibus","Multicab","Tricycle"}', true, true),
+  ('Bilwang', 9, 15, 2, '{"Bus","Minibus","Multicab","Tricycle"}', true, true),
+  ('Tubod', 11, 15, 2, '{"Bus","Minibus","Multicab","Tricycle"}', true, true),
+  ('Tolingon', 13, 15, 2, '{"Bus","Minibus","Multicab","Tricycle"}', true, true),
+  ('Apale', 15, 15, 2, '{"Bus","Minibus","Multicab","Tricycle"}', true, true)
 on conflict (barangay_name) do update
 set distance_km = excluded.distance_km,
     tricycle_base_fare = excluded.tricycle_base_fare,

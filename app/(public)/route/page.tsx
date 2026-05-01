@@ -109,7 +109,7 @@ const iconForVehicle = (label: string) => {
     key.includes('multi')
   )
     return <FaShuttleVan />;
-  if (key.includes('trycicle') || key.includes('tricycle')) return <FaTaxi />;
+  if (key.includes('tricycle')) return <FaTaxi />;
   if (key.includes('habal')) return <FaMotorcycle />;
   return <FaShuttleVan />;
 };
@@ -121,8 +121,7 @@ const imageForVehicle = (label: string) => {
   if (key.includes('van')) return '/vehicle/van.jpg';
   if (key.includes('jeep')) return '/vehicle/jeep.png';
   if (key.includes('multi')) return '/vehicle/multicab.jpg';
-  if (key.includes('trycicle') || key.includes('tricycle'))
-    return '/vehicle/trycicle.jpg';
+  if (key.includes('tricycle')) return '/vehicle/tricycle.jpg';
   return '/vehicle/van.jpg';
 };
 
@@ -133,7 +132,7 @@ const getAverageSpeedKph = (label: string) => {
   if (key.includes('van')) return 50;
   if (key.includes('jeep')) return 35;
   if (key.includes('multi')) return 32;
-  if (key.includes('trycicle') || key.includes('tricycle')) return 25;
+  if (key.includes('tricycle')) return 25;
   return 35;
 };
 
@@ -142,7 +141,7 @@ const inferDistanceKmFromFare = (row: RouteFareRow) => {
   const fare = Number(row.regular_fare || 0);
   if (fare <= 0) return 0;
 
-  if (vehicleKey.includes('trycicle') || vehicleKey.includes('tricycle')) {
+  if (vehicleKey.includes('tricycle')) {
     // Barangay tricycle rule used in setup: base 15 + 2 per km
     const inferred = (fare - 15) / 2;
     return Number.isFinite(inferred) ? Math.max(1, inferred) : 0;
@@ -266,10 +265,10 @@ const RoutePage = () => {
     return list.sort((a, b) => {
       const aIsPriority =
         a.source === 'barangay_fare' &&
-        a.vehicle_type.toLowerCase().includes('trycicle');
+        a.vehicle_type.toLowerCase().includes('tricycle');
       const bIsPriority =
         b.source === 'barangay_fare' &&
-        b.vehicle_type.toLowerCase().includes('trycicle');
+        b.vehicle_type.toLowerCase().includes('tricycle');
       if (aIsPriority && !bIsPriority) return -1;
       if (!aIsPriority && bIsPriority) return 1;
       return a.vehicle_type.localeCompare(b.vehicle_type);
