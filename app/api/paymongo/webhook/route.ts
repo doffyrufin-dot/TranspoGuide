@@ -284,8 +284,20 @@ export async function POST(req: NextRequest) {
     const paymentId = extractPaymentId(payload) || undefined;
 
     if (eventType?.includes('paid')) {
-      await markReservationPaid(reservationId, paymentId);
-      return NextResponse.json({ ok: true, status: 'paid' });
+      try {
+        await markReservationPaid(reservationId, paymentId);
+        return NextResponse.json({ ok: true, status: 'paid' });
+      } catch (error: any) {
+        const message = String(error?.message || '').toLowerCase();
+        if (message.includes('waiting for operator approval')) {
+          return NextResponse.json({
+            ok: true,
+            status: 'ignored',
+            reason: 'awaiting_operator_approval',
+          });
+        }
+        throw error;
+      }
     }
 
     if (eventType?.includes('failed') || eventType?.includes('expired')) {

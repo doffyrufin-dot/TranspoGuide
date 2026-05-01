@@ -78,6 +78,41 @@ const getEligibleQueueIds = async (operatorUserId: string) => {
     .filter(Boolean);
 };
 
+const isMissingSeenColumnError = (error: unknown) => {
+  const msg = String((error as { message?: string } | null)?.message || '').toLowerCase();
+  return msg.includes('operator_chat_seen_at') && msg.includes('column');
+};
+
+const getServiceClient = () => {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceRoleKey) {
+    throw new Error('server_env_missing');
+  }
+  return createClient(supabaseUrl, serviceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+};
+
+const markReservationChatSeen = async (
+  reservationId: string,
+  operatorUserId: string
+) => {
+  const serviceClient = getServiceClient();
+  const { error } = await serviceClient
+    .from('tbl_reservations')
+    .update({
+      operator_chat_seen_at: new Date().toISOString(),
+    })
+    .eq('id', reservationId)
+    .eq('operator_user_id', operatorUserId);
+
+  if (error) {
+    if (isMissingSeenColumnError(error)) return;
+    throw new Error(error.message || 'failed_mark_chat_seen');
+  }
+};
+
 const ensureReservationOwnedByOperator = async (
   reservationId: string,
   operatorUserId: string
@@ -116,6 +151,7 @@ export async function GET(req: NextRequest) {
 
     const operatorUserId = await getAuthorizedOperatorId(req);
     await ensureReservationOwnedByOperator(reservationId, operatorUserId);
+    await markReservationChatSeen(reservationId, operatorUserId);
 
     const messages = await getReservationMessages(reservationId);
     return NextResponse.json(
@@ -170,10 +206,46 @@ export async function POST(req: NextRequest) {
       senderName,
       message,
     });
+    await markReservationChatSeen(reservationId, operatorUserId);
 
     return NextResponse.json({ ok: true, message: createdMessage });
   } catch (error: any) {
     const msg = error?.message || 'Failed to send message.';
+    if (msg === 'missing_auth_token') {
+      return NextResponse.json({ error: msg }, { status: 401 });
+    }
+    if (msg === 'unauthorized') {
+      return NextResponse.json({ error: msg }, { status: 401 });
+    }
+    if (msg === 'forbidden_operator_chat') {
+      return NextResponse.json({ error: msg }, { status: 403 });
+    }
+    if (msg === 'chat_closed') {
+      return NextResponse.json({ error: msg }, { status: 409 });
+    }
+    if (msg === 'server_env_missing') {
+      return NextResponse.json({ error: msg }, { status: 500 });
+    }
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
+}
+
+export async function PATCH(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const reservationId = (body.reservationId || '').trim();
+
+    if (!reservationId) {
+      return NextResponse.json({ error: 'missing_reservation_id' }, { status: 400 });
+    }
+
+    const operatorUserId = await getAuthorizedOperatorId(req);
+    await ensureReservationOwnedByOperator(reservationId, operatorUserId);
+    await markReservationChatSeen(reservationId, operatorUserId);
+
+    return NextResponse.json({ ok: true });
+  } catch (error: any) {
+    const msg = error?.message || 'Failed to mark chat as seen.';
     if (msg === 'missing_auth_token') {
       return NextResponse.json({ error: msg }, { status: 401 });
     }

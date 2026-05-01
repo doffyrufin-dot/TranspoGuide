@@ -1,8 +1,23 @@
 import React, { ReactNode } from 'react';
 import type { Metadata } from 'next';
+import localFont from 'next/font/local';
 import '@/assets/styles/global.css';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import SileoToaster from '@/components/SileoToaster';
+
+const inter = localFont({
+  src: [
+    {
+      path: '../assets/fonts/Arial-Regular.ttf',
+      weight: '400',
+      style: 'normal',
+    },
+  ],
+  preload: false,
+  display: 'optional',
+  variable: '--font-inter',
+  fallback: ['system-ui', 'Arial', 'sans-serif'],
+});
 
 export const metadata: Metadata = {
   title: 'TranspoGuide',
@@ -37,7 +52,7 @@ export const metadata: Metadata = {
 const RootLayout = ({ children }: { children: ReactNode }) => {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className="bg-dots">
+      <body className={`${inter.variable} bg-dots`}>
         {/* Upskwela-style side glow orbs */}
         <div className="glow-orb-left" />
         <div className="glow-orb-right" />

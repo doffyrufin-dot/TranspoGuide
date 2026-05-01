@@ -29,6 +29,8 @@ export interface CreateReservationIntentPayload {
   passengerEmail: string;
   contactNumber: string;
   pickupLocation: string;
+  pickupLat: number;
+  pickupLng: number;
   route: string;
   seatLabels: string[];
   amount: number;
@@ -63,6 +65,7 @@ export interface ReservationStatusPayload {
   status: string;
   payment_id: string | null;
   paid_at: string | null;
+  lock_expires_at?: string | null;
   created_at: string;
   operator_user_id: string | null;
   queue_id: string | null;
@@ -77,10 +80,22 @@ export interface ReservationMessage {
   created_at: string;
 }
 
+export interface ReservationOperatorFeedback {
+  id: string;
+  reservation_id: string;
+  operator_user_id: string;
+  commuter_name: string | null;
+  commuter_email: string | null;
+  rating: number;
+  feedback: string | null;
+  created_at: string;
+}
+
 export interface ReservationStatusResult {
   reservation: ReservationStatusPayload;
   operator: { name: string; email: string } | null;
   messages: ReservationMessage[];
+  feedback: ReservationOperatorFeedback | null;
 }
 
 export async function createReservationIntent(
@@ -134,6 +149,19 @@ export async function createCheckoutSession(
     payload
   );
   return data.checkout_url;
+}
+
+export async function submitReservationOperatorFeedback(input: {
+  reservationId: string;
+  reservationToken: string;
+  rating: number;
+  feedback?: string;
+}): Promise<ReservationOperatorFeedback> {
+  const { data } = await http.post<{ feedback: ReservationOperatorFeedback }>(
+    '/api/reservations/rating',
+    input
+  );
+  return data.feedback;
 }
 
 export async function fetchPaymentHistory(): Promise<PaymentRecord[]> {

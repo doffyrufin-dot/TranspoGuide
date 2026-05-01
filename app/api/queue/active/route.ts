@@ -11,6 +11,23 @@ const toTimeLabel = (value?: string | null) => {
   });
 };
 
+const normalizeRouteKey = (value?: string | null) =>
+  (value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+
+const toRouteLabel = (value?: string | null) => {
+  const normalized = normalizeRouteKey(value);
+  if (!normalized) return '';
+  return normalized
+    .split(' ')
+    .map((part) =>
+      part ? part.charAt(0).toUpperCase() + part.slice(1) : part
+    )
+    .join(' ');
+};
+
 export async function GET(req: NextRequest) {
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -19,7 +36,9 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'server_env_missing' }, { status: 500 });
     }
 
-    const routeFilter = req.nextUrl.searchParams.get('route')?.trim() || null;
+    const routeFilter = normalizeRouteKey(
+      req.nextUrl.searchParams.get('route')?.trim() || null
+    );
 
     const supabase = createClient(supabaseUrl, serviceRoleKey, {
       auth: { persistSession: false, autoRefreshToken: false },
@@ -35,7 +54,7 @@ export async function GET(req: NextRequest) {
       .limit(30);
 
     if (routeFilter) {
-      query = query.eq('route', routeFilter);
+      query = query.ilike('route', routeFilter);
     }
 
     const { data: queueRows, error: queueError } = await query;
@@ -46,8 +65,56 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    const normalizedRows = [...(queueRows || [])];
+    const groupedByRoute = new Map<string, any[]>();
+    for (const row of normalizedRows) {
+      const routeKey = normalizeRouteKey(row.route);
+      if (!routeKey) continue;
+      const group = groupedByRoute.get(routeKey) || [];
+      group.push(row);
+      groupedByRoute.set(routeKey, group);
+    }
+
+    const nowIso = new Date().toISOString();
+    const normalizeUpdates: any[] = [];
+    for (const rows of groupedByRoute.values()) {
+      const sorted = [...rows].sort((a, b) => {
+        const posDiff = Number(a.queue_position || 0) - Number(b.queue_position || 0);
+        if (posDiff !== 0) return posDiff;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
+
+      sorted.forEach((row, index) => {
+        const expectedPosition = index + 1;
+        const expectedStatus = index === 0 ? 'boarding' : 'queued';
+        const currentStatus = String(row.status || '').toLowerCase();
+        const currentPosition = Number(row.queue_position || 0);
+        const needsUpdate =
+          currentPosition !== expectedPosition || currentStatus !== expectedStatus;
+
+        if (!needsUpdate) return;
+
+        row.queue_position = expectedPosition;
+        row.status = expectedStatus;
+        normalizeUpdates.push(
+          supabase
+            .from('tbl_van_queue')
+            .update({
+              queue_position: expectedPosition,
+              status: expectedStatus,
+              updated_at: nowIso,
+            })
+            .eq('id', row.id)
+        );
+      });
+    }
+
+    if (normalizeUpdates.length > 0) {
+      await Promise.allSettled(normalizeUpdates);
+    }
+
     const operatorIds = Array.from(
-      new Set((queueRows || []).map((q: any) => q.operator_user_id).filter(Boolean))
+      new Set(normalizedRows.map((q: any) => q.operator_user_id).filter(Boolean))
     ) as string[];
 
     let userMap = new Map<string, { full_name: string | null; email: string | null }>();
@@ -65,7 +132,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const queue = (queueRows || []).map((q: any) => {
+    const queue = normalizedRows.map((q: any) => {
       const operator = userMap.get(q.operator_user_id) || {
         full_name: null,
         email: null,
@@ -81,7 +148,7 @@ export async function GET(req: NextRequest) {
         departure: toTimeLabel(q.departure_time) || 'TBD',
         status: q.status || 'queued',
         position: Number(q.queue_position || 0),
-        route: q.route || '',
+        route: toRouteLabel(q.route || ''),
       };
     });
 

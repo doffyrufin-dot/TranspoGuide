@@ -38,6 +38,7 @@ const resolveRequestOrigin = (request: NextRequest) => {
     request.headers.get('x-forwarded-host') || request.headers.get('host') || ''
   ).trim();
   const forwardedProto = (request.headers.get('x-forwarded-proto') || '').trim();
+  const requestOrigin = normalizeBaseUrl(new URL(request.url).origin);
 
   if (forwardedHost) {
     const protocol =
@@ -52,8 +53,13 @@ const resolveRequestOrigin = (request: NextRequest) => {
     if (!envUrl) return forwardedOrigin;
   }
 
+  // If env is stale localhost but request URL is already a public host, trust request URL.
+  if (envUrl && isLocalUrl(envUrl) && !isLocalUrl(requestOrigin)) {
+    return requestOrigin;
+  }
+
   if (envUrl) return envUrl;
-  return normalizeBaseUrl(new URL(request.url).origin);
+  return requestOrigin;
 };
 
 export async function GET(request: NextRequest) {

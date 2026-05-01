@@ -1,5 +1,6 @@
 'use client';
 
+<<<<<<< HEAD
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   FaArrowRight,
@@ -312,313 +313,61 @@ const RoutePage = () => {
       setMetricsLoading(false);
     }
   };
+=======
+import React from 'react';
+import RouteResultsSection from './components/RouteResultsSection';
+import RouteSearchPanel from './components/RouteSearchPanel';
+import { useRouteSearch } from './hooks/useRouteSearch';
+
+const RoutePage = () => {
+  const {
+    vehicle,
+    setVehicle,
+    origin,
+    setOrigin,
+    destination,
+    setDestination,
+    loading,
+    loadError,
+    appliedFilters,
+    metricsByKey,
+    metricsLoading,
+    vehicleTypes,
+    origins,
+    destinations,
+    displayRows,
+    swap,
+    handleSearch,
+  } = useRouteSearch();
+>>>>>>> 8a818bca7aea478f34a0909c19490afcff2cf34c
 
   return (
-    <main>
-      <section className="relative pt-36 pb-20 px-6">
-        <FadeIn className="max-w-4xl mx-auto text-center">
-          <div className="section-badge mx-auto mb-5">Route Finder</div>
-          <h1 className="text-4xl md:text-5xl font-extrabold text-theme leading-tight">
-            Find Your{' '}
-            <span className="text-gradient" style={{ fontStyle: 'italic' }}>
-              Fastest Route
-            </span>
-          </h1>
-          <p className="mt-4 text-muted-theme text-lg max-w-xl mx-auto">
-            Search routes and compare fares using your admin-configured route
-            matrix.
-          </p>
-        </FadeIn>
+    <div>
+      <RouteSearchPanel
+        vehicle={vehicle}
+        origin={origin}
+        destination={destination}
+        vehicleTypes={vehicleTypes}
+        origins={origins}
+        destinations={destinations}
+        onVehicleChange={setVehicle}
+        onOriginChange={setOrigin}
+        onDestinationChange={setDestination}
+        onSwap={swap}
+        onSearch={handleSearch}
+      />
 
-        <FadeIn className="max-w-3xl mx-auto mt-10" delay={0.08}>
-          <div className="card-glow p-6 md:p-8 rounded-2xl">
-            <div className="flex flex-wrap gap-2 mb-6">
-              <button
-                onClick={() => setVehicle('all')}
-                className={`px-4 py-1.5 rounded-full text-sm font-medium transition-all cursor-pointer ${vehicle === 'all' ? 'btn-primary shadow-none py-1.5 px-4' : ''}`}
-                style={
-                  vehicle !== 'all'
-                    ? {
-                        background: 'var(--tg-subtle)',
-                        border: '1px solid var(--tg-border-primary)',
-                        color: 'var(--primary)',
-                      }
-                    : {}
-                }
-              >
-                All Types
-              </button>
-              {vehicleTypes.map((label) => (
-                <button
-                  key={label}
-                  onClick={() => setVehicle(label)}
-                  className={`px-4 py-1.5 rounded-full text-sm font-medium flex items-center gap-2 transition-all cursor-pointer ${vehicle === label ? 'btn-primary shadow-none py-1.5 px-4' : ''}`}
-                  style={
-                    vehicle !== label
-                      ? {
-                          background: 'var(--tg-subtle)',
-                          border: '1px solid var(--tg-border-primary)',
-                          color: 'var(--primary)',
-                        }
-                      : {}
-                  }
-                >
-                  <span className="text-xs">{iconForVehicle(label)}</span>
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr] gap-3 items-center">
-              <div className="relative">
-                <div className="input-dark pl-3 pr-9 flex items-center gap-2">
-                  <FaMapMarkerAlt
-                    className="text-sm shrink-0"
-                    style={{ color: 'var(--primary)' }}
-                  />
-                  <select
-                    value={origin}
-                    onChange={(e) => setOrigin(e.target.value)}
-                    className="w-full bg-transparent outline-none border-0 text-theme appearance-none"
-                    style={
-                      {
-                        WebkitAppearance: 'none',
-                        MozAppearance: 'none',
-                      } as React.CSSProperties
-                    }
-                  >
-                    <option
-                      value=""
-                      className="bg-white dark:bg-gray-800 text-black dark:text-white"
-                    >
-                      All Origins
-                    </option>
-                    {origins.map((o) => (
-                      <option
-                        className="bg-white dark:bg-gray-800 text-black dark:text-white"
-                        key={o}
-                        value={o}
-                      >
-                        {o}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <FaChevronDown
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-xs pointer-events-none"
-                  style={{ color: 'var(--tg-muted)' }}
-                />
-              </div>
-              <button
-                onClick={swap}
-                className="theme-toggle mx-auto"
-                title="Swap"
-                style={{ color: 'var(--primary)' }}
-              >
-                <FaExchangeAlt size={13} />
-              </button>
-              <div className="relative">
-                <div className="input-dark pl-3 pr-9 flex items-center gap-2">
-                  <FaMapMarkerAlt
-                    className="text-sm shrink-0"
-                    style={{ color: 'var(--primary)' }}
-                  />
-                  <select
-                    value={destination}
-                    onChange={(e) => setDestination(e.target.value)}
-                    className="w-full bg-transparent outline-none border-0 text-theme appearance-none"
-                    style={
-                      {
-                        WebkitAppearance: 'none',
-                        MozAppearance: 'none',
-                      } as React.CSSProperties
-                    }
-                  >
-                    <option
-                      value=""
-                      className="bg-white dark:bg-gray-800 text-black dark:text-white"
-                    >
-                      All Destinations
-                    </option>
-                    {destinations.map((d) => (
-                      <option
-                        className="bg-white dark:bg-gray-800 text-black dark:text-white"
-                        key={d}
-                        value={d}
-                      >
-                        {d}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <FaChevronDown
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-xs pointer-events-none"
-                  style={{ color: 'var(--tg-muted)' }}
-                />
-              </div>
-            </div>
-
-            <button
-              className="btn-primary w-full text-base mt-5 group"
-              type="button"
-              onClick={handleSearch}
-            >
-              <FaSearch size={14} /> Search Routes{' '}
-              <FaArrowRight
-                size={13}
-                className="ml-auto group-hover:translate-x-1 transition-transform"
-              />
-            </button>
-          </div>
-        </FadeIn>
-      </section>
-
-      {appliedFilters && (
-        <section className="px-6 pb-28">
-          <div className="max-w-5xl mx-auto">
-            {loading ? (
-              <div className="card-glow rounded-2xl p-10 text-center text-muted-theme text-sm">
-                Loading route results...
-              </div>
-            ) : loadError ? (
-              <div className="card-glow rounded-2xl p-10 text-center text-sm text-theme">
-                {loadError}
-              </div>
-            ) : displayRows.length === 0 ? (
-              <div className="card-glow rounded-2xl p-10 text-center text-muted-theme text-sm">
-                No routes found for your current filters.
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {metricsLoading && (
-                  <div className="text-xs text-muted-theme">
-                    Fetching latest distance and travel time...
-                  </div>
-                )}
-                <Stagger className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-                  {displayRows.map((r) => {
-                    const discounted = r.regular_fare * (1 - r.discount_rate);
-                    const savings = r.regular_fare - discounted;
-                    const key = normalizeRouteKey(
-                      r.origin,
-                      r.destination,
-                      r.vehicle_type
-                    );
-                    const metric = metricsByKey[key];
-                    const distanceKm = metric?.distance_km ?? getDistanceKm(r);
-                    const estimatedMinutes =
-                      metric?.duration_minutes ??
-                      (distanceKm > 0
-                        ? (distanceKm / getAverageSpeedKph(r.vehicle_type)) * 60
-                        : 0);
-                    return (
-                      <StaggerItem key={r.id}>
-                        <div
-                          className="rounded-2xl overflow-hidden transition-all duration-200 hover:-translate-y-1"
-                          style={{
-                            background: 'var(--tg-bg-alt)',
-                            border: '1px solid var(--tg-border)',
-                            boxShadow: 'var(--tg-shadow)',
-                          }}
-                        >
-                          <div
-                            className="h-40 w-full"
-                            style={{ background: 'var(--tg-subtle)' }}
-                          >
-                            <img
-                              src={imageForVehicle(r.vehicle_type)}
-                              alt={r.vehicle_type}
-                              className="w-full h-full object-cover"
-                            />
-                          </div>
-
-                          <div className="p-4 md:p-5">
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <p className="text-theme font-bold text-xl">
-                                  {r.vehicle_type}
-                                </p>
-                                <p className="text-muted-theme text-sm mt-1">
-                                  {r.origin} to {r.destination}
-                                </p>
-                              </div>
-                              <span
-                                className="text-sm"
-                                style={{ color: 'var(--primary)' }}
-                              >
-                                {iconForVehicle(r.vehicle_type)}
-                              </span>
-                            </div>
-
-                            <div className="mt-4 space-y-1">
-                              <p className="text-muted-theme text-sm">
-                                Regular:{' '}
-                                <span className="text-theme font-semibold">
-                                  P{r.regular_fare.toFixed(2)}
-                                </span>
-                              </p>
-                              <p className="text-muted-theme text-sm">
-                                Discounted:{' '}
-                                <span
-                                  style={{ color: 'var(--primary)' }}
-                                  className="font-bold"
-                                >
-                                  P{discounted.toFixed(2)}
-                                </span>
-                              </p>
-                              <p className="text-muted-theme text-sm">
-                                You save:{' '}
-                                <span className="text-theme font-semibold">
-                                  P{savings.toFixed(2)}
-                                </span>
-                              </p>
-                            </div>
-
-                            <div className="mt-4 grid grid-cols-2 gap-2">
-                              <div
-                                className="rounded-lg px-3 py-2 text-xs"
-                                style={{
-                                  background: 'var(--tg-subtle)',
-                                  border: '1px solid var(--tg-border)',
-                                }}
-                              >
-                                <p className="text-muted-theme">Distance</p>
-                                <p className="text-theme font-semibold">
-                                  {distanceKm > 0
-                                    ? `${distanceKm.toFixed(1)} km`
-                                    : '--'}
-                                </p>
-                              </div>
-                              <div
-                                className="rounded-lg px-3 py-2 text-xs"
-                                style={{
-                                  background: 'var(--tg-subtle)',
-                                  border: '1px solid var(--tg-border)',
-                                }}
-                              >
-                                <p className="text-muted-theme flex items-center gap-1">
-                                  <FaClock size={10} /> Travel Time
-                                </p>
-                                <p className="text-theme font-semibold">
-                                  {estimatedMinutes > 0
-                                    ? formatTravelTime(estimatedMinutes)
-                                    : '--'}
-                                </p>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </StaggerItem>
-                    );
-                  })}
-                </Stagger>
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-    </main>
+      <RouteResultsSection
+        show={Boolean(appliedFilters)}
+        loading={loading}
+        loadError={loadError}
+        rows={displayRows}
+        metricsByKey={metricsByKey}
+        metricsLoading={metricsLoading}
+      />
+    </div>
   );
 };
 
 export default RoutePage;
+

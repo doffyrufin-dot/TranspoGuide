@@ -26,6 +26,8 @@ alter table public.tbl_reservations
       'paid',
       'confirmed',
       'rejected',
-      'cancelled'
+      'cancelled',
+      'picked_up',
+      'departed'
     )
   );

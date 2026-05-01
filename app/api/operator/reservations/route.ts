@@ -5,6 +5,7 @@ import { listReservationsByOperator } from '@/lib/db/reservations';
 const isFinalStatus = (status?: string | null) => {
   const s = (status || '').toLowerCase();
   return (
+    s === 'pending_payment' ||
     s === 'confirmed' ||
     s === 'cancelled' ||
     s === 'rejected' ||
@@ -15,11 +16,7 @@ const isFinalStatus = (status?: string | null) => {
 
 const isPendingStatus = (status?: string | null) => {
   const s = (status || '').toLowerCase();
-  return (
-    s === 'pending_payment' ||
-    s === 'pending_operator_approval' ||
-    s === 'paid'
-  );
+  return s === 'pending_operator_approval';
 };
 
 export async function GET(req: NextRequest) {

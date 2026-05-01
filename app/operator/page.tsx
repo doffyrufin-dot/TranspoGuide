@@ -3,11 +3,13 @@
 import React, { useState, useEffect, useMemo, useCallback, ElementType } from 'react';
 import { createPortal } from 'react-dom';
 import dynamic from 'next/dynamic';
+import Image from 'next/image';
 import 'leaflet/dist/leaflet.css';
 import type { AuthChangeEvent, RealtimeChannel, Session } from '@supabase/supabase-js';
 import { supabase } from '@/utils/supabase/client';
 import { useTheme } from '@/components/ThemeProvider';
 import sileoToast from '@/lib/utils/sileo-toast';
+import playNotificationSound from '@/lib/utils/notification-sound';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -15,7 +17,11 @@ import {
   fetchOperatorBoardingPassengers,
   fetchOperatorChatConversations,
   fetchOperatorUnreadChatCount,
+  markOperatorReservationChatSeen,
   fetchOperatorPaymentHistory,
+  fetchOperatorPaymentAccountStatus,
+  fetchOperatorProfile,
+  fetchOperatorRatingSummary,
   fetchOperatorReservationMessages,
   fetchOperatorReservations,
   type OperatorBoardingPassenger,
@@ -24,7 +30,12 @@ import {
   updateOperatorReservationStatus,
   type OperatorReservationMessage,
   type OperatorPaymentRecord,
+  type OperatorPaymentAccountStatusResult,
+  type OperatorProfileResult,
+  type OperatorRatingSummaryResult,
   type OperatorReservationRecord,
+  saveOperatorPaymentAccount,
+  saveOperatorProfile,
 } from '@/lib/services/operator.services';
 import {
   fetchActiveQueue,
@@ -39,7 +50,6 @@ import {
   LogOut,
   Bell,
   Check,
-  X,
   Phone,
   Clock,
   User,
@@ -54,6 +64,8 @@ import {
   MessageCircle,
   SendHorizontal,
   Smile,
+  Eye,
+  Star,
 } from 'lucide-react';
 
 const LeafletMapContainer = dynamic<any>(
@@ -81,15 +93,34 @@ const isAbortLikeError = (error: unknown) => {
   return name.includes('abort') || message.includes('aborted');
 };
 
-const CHAT_UNREAD_REFRESH_MS = 30000;
-const CHAT_LIST_REFRESH_MS = 10000;
-const CHAT_THREAD_REFRESH_MS = 10000;
+const CHAT_UNREAD_REFRESH_MS = 60000;
+const CHAT_LIST_REFRESH_MS = 30000;
+const CHAT_THREAD_REFRESH_MS = 30000;
+const NOTIFICATION_REFRESH_MS = 5000;
+const MY_VEHICLE_QUEUE_REFRESH_MS = 300000;
+const MY_VEHICLE_SEATMAP_REFRESH_MS = 40000;
+const GEOCODE_CACHE_TTL_MS = 30 * 60 * 1000;
+const GEOCODE_CACHE_MAX_ENTRIES = 120;
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible';
 
 type DashboardNotification = {
   id: string;
   title: string;
   description: string;
   created_at: string;
+  target_tab?: 'Reservations' | 'Settings';
+};
+
+type OperatorUiSettings = {
+  dashboardNotificationSoundEnabled: boolean;
+  chatUnreadSoundEnabled: boolean;
+};
+
+const OPERATOR_UI_SETTINGS_KEY_PREFIX = 'tg_operator_ui_settings_v1_';
+const DEFAULT_OPERATOR_UI_SETTINGS: OperatorUiSettings = {
+  dashboardNotificationSoundEnabled: true,
+  chatUnreadSoundEnabled: true,
 };
 
 type OperatorSeatMapItem = {
@@ -98,13 +129,14 @@ type OperatorSeatMapItem = {
   passengerName: string | null;
   reservationId: string | null;
   source: 'reservation' | 'walk_in' | null;
+  walkInDiscounted?: boolean;
 };
 
 export default function OperatorDashboard() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [activeView, setActiveView] = useState('Reservations');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [operatorName, setOperatorName] = useState('Operator');
   const [operatorEmail, setOperatorEmail] = useState('');
   const [operatorAvatarUrl, setOperatorAvatarUrl] = useState('');
@@ -114,6 +146,18 @@ export default function OperatorDashboard() {
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifUnreadCount, setNotifUnreadCount] = useState(0);
   const [notifications, setNotifications] = useState<DashboardNotification[]>([]);
+  const [paymentSetupStatus, setPaymentSetupStatus] =
+    useState<OperatorPaymentAccountStatusResult | null>(null);
+  const [paymentSetupLoading, setPaymentSetupLoading] = useState(false);
+  const [paymentSetupPromptDismissed, setPaymentSetupPromptDismissed] =
+    useState(false);
+  const [operatorUiSettings, setOperatorUiSettings] = useState<OperatorUiSettings>(
+    DEFAULT_OPERATOR_UI_SETTINGS
+  );
+  const notifSoundReadyRef = React.useRef(false);
+  const notifTopIdRef = React.useRef('');
+  const notifOpenRef = React.useRef(false);
+  const operatorUiSettingsRef = React.useRef(DEFAULT_OPERATOR_UI_SETTINGS);
 
   useEffect(() => {
     let cancelled = false;
@@ -215,6 +259,43 @@ export default function OperatorDashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!operatorUserId || typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(
+        `${OPERATOR_UI_SETTINGS_KEY_PREFIX}${operatorUserId}`
+      );
+      if (!raw) {
+        setOperatorUiSettings(DEFAULT_OPERATOR_UI_SETTINGS);
+        return;
+      }
+      const parsed = JSON.parse(raw) as Partial<OperatorUiSettings>;
+      setOperatorUiSettings({
+        dashboardNotificationSoundEnabled:
+          parsed.dashboardNotificationSoundEnabled ??
+          DEFAULT_OPERATOR_UI_SETTINGS.dashboardNotificationSoundEnabled,
+        chatUnreadSoundEnabled:
+          parsed.chatUnreadSoundEnabled ??
+          DEFAULT_OPERATOR_UI_SETTINGS.chatUnreadSoundEnabled,
+      });
+    } catch {
+      setOperatorUiSettings(DEFAULT_OPERATOR_UI_SETTINGS);
+    }
+  }, [operatorUserId]);
+
+  useEffect(() => {
+    if (!operatorUserId || typeof window === 'undefined') return;
+    window.localStorage.setItem(
+      `${OPERATOR_UI_SETTINGS_KEY_PREFIX}${operatorUserId}`,
+      JSON.stringify(operatorUiSettings)
+    );
+    operatorUiSettingsRef.current = operatorUiSettings;
+  }, [operatorUserId, operatorUiSettings]);
+
+  useEffect(() => {
+    notifOpenRef.current = notifOpen;
+  }, [notifOpen]);
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     window.location.replace('/login');
@@ -225,36 +306,104 @@ export default function OperatorDashboard() {
     setIsSidebarOpen(false);
   };
 
-  const loadNotifications = useCallback(async (silent = false) => {
+  const loadNotifications = useCallback(async () => {
     if (!sessionToken) return;
     try {
-      const res = await fetch('/api/operator/notifications', {
+      const res = await fetch(
+        `/api/operator/notifications?t=${Date.now().toString(36)}`,
+        {
         headers: {
           Authorization: `Bearer ${sessionToken}`,
         },
-        cache: 'no-store',
-      });
+          cache: 'no-store',
+        }
+      );
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || 'Failed to load notifications.');
       }
-      setNotifications((data.notifications || []) as DashboardNotification[]);
-      if (!notifOpen) {
+      const nextNotifications = (data.notifications || []) as DashboardNotification[];
+      const nextTopId = String(
+        nextNotifications.find((item) => item.id !== 'setup-payment-account')?.id ||
+          nextNotifications[0]?.id ||
+          ''
+      ).trim();
+      const soundEnabled =
+        operatorUiSettingsRef.current.dashboardNotificationSoundEnabled;
+      if (
+        notifSoundReadyRef.current &&
+        nextTopId &&
+        nextTopId !== notifTopIdRef.current &&
+        soundEnabled
+      ) {
+        playNotificationSound();
+      }
+      if (!notifSoundReadyRef.current) {
+        notifSoundReadyRef.current = true;
+      }
+      notifTopIdRef.current = nextTopId;
+      setNotifications(nextNotifications);
+      if (!notifOpenRef.current) {
         setNotifUnreadCount(Number(data.unreadCount || 0));
       }
     } catch {
       // silent fail for bell data
     }
-  }, [sessionToken, notifOpen]);
+  }, [sessionToken]);
+
+  const loadPaymentSetupStatus = useCallback(async () => {
+    if (!sessionToken) return;
+    try {
+      setPaymentSetupLoading(true);
+      const snapshot = await fetchOperatorPaymentAccountStatus(sessionToken);
+      setPaymentSetupStatus(snapshot);
+      if (!snapshot.setupRequired) {
+        setPaymentSetupPromptDismissed(false);
+      }
+    } catch {
+      // no-op: keep dashboard usable even if payment setup status fetch fails
+    } finally {
+      setPaymentSetupLoading(false);
+    }
+  }, [sessionToken]);
 
   useEffect(() => {
     if (!sessionToken) return;
-    void loadNotifications(false);
+    void loadNotifications();
     const timer = window.setInterval(() => {
-      void loadNotifications(true);
-    }, 30000);
+      if (!isDocumentVisible()) return;
+      void loadNotifications();
+    }, NOTIFICATION_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [sessionToken, notifOpen, loadNotifications]);
+  }, [sessionToken, loadNotifications]);
+
+  useEffect(() => {
+    if (!sessionToken || typeof window === 'undefined') return;
+    const handleVisibilityOrFocus = () => {
+      if (!isDocumentVisible()) return;
+      void loadNotifications();
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    }
+
+    return () => {
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener(
+          'visibilitychange',
+          handleVisibilityOrFocus
+        );
+      }
+    };
+  }, [sessionToken, loadNotifications]);
+
+  useEffect(() => {
+    if (!sessionToken || !operatorUserId) return;
+    void loadPaymentSetupStatus();
+  }, [sessionToken, operatorUserId, loadPaymentSetupStatus]);
 
   useEffect(() => {
     if (!sessionToken || !operatorUserId) return;
@@ -264,8 +413,9 @@ export default function OperatorDashboard() {
       if (refreshTimeout) return;
       refreshTimeout = window.setTimeout(() => {
         refreshTimeout = null;
-        void loadNotifications(true);
-      }, 250);
+        void loadNotifications();
+        void loadPaymentSetupStatus();
+      }, 80);
     };
 
     const notificationsChannel = supabase
@@ -280,7 +430,31 @@ export default function OperatorDashboard() {
         },
         scheduleRefresh
       )
-      .subscribe();
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_operator_applications',
+          filter: `user_id=eq.${operatorUserId}`,
+        },
+        scheduleRefresh
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_operator_payment_accounts',
+          filter: `operator_user_id=eq.${operatorUserId}`,
+        },
+        scheduleRefresh
+      )
+      .subscribe((status: string) => {
+        if (status === 'SUBSCRIBED') {
+          scheduleRefresh();
+        }
+      });
 
     return () => {
       if (refreshTimeout) {
@@ -288,7 +462,7 @@ export default function OperatorDashboard() {
       }
       void supabase.removeChannel(notificationsChannel);
     };
-  }, [sessionToken, operatorUserId, loadNotifications]);
+  }, [sessionToken, operatorUserId, loadNotifications, loadPaymentSetupStatus]);
 
   const formatNotifTime = (value: string) => {
     const date = new Date(value);
@@ -298,7 +472,13 @@ export default function OperatorDashboard() {
 
   const renderContent = () => {
       switch (activeView) {
-      case 'Reservations': return <ReservationsContent accessToken={sessionToken} />;
+      case 'Reservations':
+        return (
+          <ReservationsContent
+            accessToken={sessionToken}
+            operatorUserId={operatorUserId}
+          />
+        );
       case 'Passengers':
         return (
           <PassengersContent
@@ -316,6 +496,32 @@ export default function OperatorDashboard() {
           />
         );
       case 'Income': return <IncomeHistoryContent accessToken={sessionToken} />;
+      case 'Settings':
+        return (
+          <OperatorSettingsContent
+            accessToken={sessionToken}
+            operatorUserId={operatorUserId}
+            displayName={operatorName}
+            displayEmail={operatorEmail}
+            displayAvatarUrl={operatorAvatarUrl}
+            uiSettings={operatorUiSettings}
+            onUiSettingsChange={setOperatorUiSettings}
+            onProfileSaved={(profile) => {
+              setOperatorName(profile.fullName || 'Operator');
+              setOperatorEmail(profile.email || '');
+              setOperatorAvatarUrl(profile.avatarUrl || '');
+            }}
+            statusSnapshot={paymentSetupStatus}
+            statusLoading={paymentSetupLoading}
+            onStatusChanged={(nextStatus) => {
+              setPaymentSetupStatus(nextStatus);
+              if (!nextStatus.setupRequired) {
+                setPaymentSetupPromptDismissed(false);
+              }
+              void loadPaymentSetupStatus();
+            }}
+          />
+        );
       default: return (
         <div className="admin-tab p-10 text-center opacity-60">
           <h2 className="text-xl font-bold text-theme">Coming Soon</h2>
@@ -523,7 +729,11 @@ export default function OperatorDashboard() {
                             key={item.id}
                             type="button"
                             onClick={() => {
-                              setActiveView('Reservations');
+                              setActiveView(
+                                item.target_tab === 'Settings'
+                                  ? 'Settings'
+                                  : 'Reservations'
+                              );
                               setNotifOpen(false);
                               setNotifUnreadCount(0);
                             }}
@@ -548,20 +758,69 @@ export default function OperatorDashboard() {
                 <p className="text-sm font-bold text-theme">{operatorName.split(' ')[0]}</p>
                 <p className="text-xs text-muted-theme">Operator</p>
               </div>
-              <img
+              <Image
                 src={operatorAvatarUrl?.trim() || '/images/profile.png'}
                 alt="Operator avatar"
+                width={36}
+                height={36}
                 className="w-9 h-9 rounded-xl object-cover"
-                onError={(e) => {
-                  e.currentTarget.src = '/images/profile.png';
-                }}
+                sizes="36px"
               />
             </div>
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-6">{renderContent()}</div>
-        <OperatorChatWidget accessToken={sessionToken} />
+        <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4">
+          {paymentSetupStatus?.setupRequired && !paymentSetupPromptDismissed && (
+            <div
+              className="rounded-2xl p-4 md:p-5 flex flex-col md:flex-row md:items-center md:justify-between gap-3"
+              style={{
+                background: 'rgba(245,158,11,0.12)',
+                border: '1px solid rgba(245,158,11,0.35)',
+              }}
+            >
+              <div>
+                <p className="text-sm font-semibold" style={{ color: '#f59e0b' }}>
+                  Complete payout setup required
+                </p>
+                <p className="text-xs text-theme mt-1">
+                  Add your PayMongo Secret Key in Settings so online downpayments
+                  will go to your operator account.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveView('Settings')}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                  style={{
+                    background: 'var(--primary)',
+                    color: '#fff',
+                  }}
+                >
+                  Setup Now
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaymentSetupPromptDismissed(true)}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    color: 'var(--tg-muted)',
+                    border: '1px solid var(--tg-border-primary)',
+                  }}
+                >
+                  Later
+                </button>
+              </div>
+            </div>
+          )}
+          {renderContent()}
+        </div>
+        <OperatorChatWidget
+          accessToken={sessionToken}
+          soundEnabled={operatorUiSettings.chatUnreadSoundEnabled}
+        />
       </main>
     </div>
   );
@@ -608,7 +867,13 @@ function SidebarItem({ icon: Icon, label, active, collapsed, onClick }: {
   );
 }
 
-function OperatorChatWidget({ accessToken }: { accessToken: string }) {
+function OperatorChatWidget({
+  accessToken,
+  soundEnabled,
+}: {
+  accessToken: string;
+  soundEnabled: boolean;
+}) {
   const CHAT_RENDER_LIMIT = 160;
   const [chatOpen, setChatOpen] = useState(false);
   const [chatReservationId, setChatReservationId] = useState('');
@@ -626,6 +891,8 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   const chatBodyRef = React.useRef<HTMLDivElement | null>(null);
   const chatRealtimeRef = React.useRef<RealtimeChannel | null>(null);
   const unreadRealtimeRef = React.useRef<RealtimeChannel | null>(null);
+  const unreadSoundReadyRef = React.useRef(false);
+  const prevUnreadThreadCountRef = React.useRef(0);
   const chatOpenRef = React.useRef(false);
   const activeReservationRef = React.useRef('');
   const quickEmojis = ['😀', '😁', '😂', '😊', '😍', '👍', '🙏', '❤️'];
@@ -712,12 +979,61 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     }
   };
 
+  const clearLocalUnreadForReservation = (reservationId: string) => {
+    const targetId = String(reservationId || '').trim();
+    if (!targetId) return;
+    setUnreadByReservation((prev) => {
+      const currentUnread = Number(prev[targetId] || 0);
+      if (currentUnread <= 0) return prev;
+      const next = { ...prev, [targetId]: 0 };
+      const nextThreadCount = Object.values(next).filter((value) => Number(value || 0) > 0)
+        .length;
+      setUnreadThreadCount(nextThreadCount);
+      return next;
+    });
+  };
+
+  const markThreadSeen = async (
+    reservationId?: string,
+    options?: { silent?: boolean }
+  ) => {
+    const targetId = (reservationId || chatReservationId || '').trim();
+    if (!targetId || !accessToken) return;
+    try {
+      await markOperatorReservationChatSeen({
+        accessToken,
+        reservationId: targetId,
+      });
+      clearLocalUnreadForReservation(targetId);
+    } catch {
+      if (!options?.silent) {
+        sileoToast.error({
+          title: 'Unable to mark chat as seen',
+          description: 'Please try again.',
+        });
+      }
+    }
+  };
+
   const loadUnreadCount = async (silent = true) => {
     if (!accessToken) return;
     try {
       const result = await fetchOperatorUnreadChatCount(accessToken);
-      setUnreadThreadCount(Number(result.unreadThreadCount || 0));
-      setUnreadByReservation(result.unreadByReservation || {});
+      const nextUnreadByReservation = {
+        ...(result.unreadByReservation || {}),
+      } as Record<string, number>;
+      const activeReservationId = (chatOpenRef.current
+        ? activeReservationRef.current
+        : ''
+      ).trim();
+      if (activeReservationId) {
+        nextUnreadByReservation[activeReservationId] = 0;
+      }
+      const nextThreadCount = Object.values(nextUnreadByReservation).filter(
+        (value) => Number(value || 0) > 0
+      ).length;
+      setUnreadThreadCount(nextThreadCount);
+      setUnreadByReservation(nextUnreadByReservation);
     } catch {
       if (!silent) {
         sileoToast.error({
@@ -742,6 +1058,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
         reservationId: targetId,
       });
       setChatMessages(rows || []);
+      await markThreadSeen(targetId, { silent: true });
     } catch (error: any) {
       if (!silent) {
         sileoToast.error({
@@ -812,10 +1129,26 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   }, []);
 
   useEffect(() => {
+    const prevCount = prevUnreadThreadCountRef.current;
+    if (
+      soundEnabled &&
+      unreadSoundReadyRef.current &&
+      unreadThreadCount > prevCount
+    ) {
+      playNotificationSound();
+    }
+    prevUnreadThreadCountRef.current = unreadThreadCount;
+    if (!unreadSoundReadyRef.current) {
+      unreadSoundReadyRef.current = true;
+    }
+  }, [unreadThreadCount, soundEnabled]);
+
+  useEffect(() => {
     if (!accessToken) return;
     void loadUnreadCount(true);
     if (chatOpen) return;
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadUnreadCount(true);
     }, CHAT_UNREAD_REFRESH_MS);
     return () => {
@@ -829,6 +1162,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
     void loadReservations(false);
     void loadUnreadCount(true);
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadReservations(true);
       void loadUnreadCount(true);
     }, CHAT_LIST_REFRESH_MS);
@@ -893,6 +1227,7 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
   useEffect(() => {
     if (!chatOpen || !chatReservationId || !accessToken) return;
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadChat(chatReservationId, { silent: true });
     }, CHAT_THREAD_REFRESH_MS);
     return () => {
@@ -946,10 +1281,13 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
           const reservationId = String(row.reservation_id || '').trim();
           if (!reservationId) return;
 
-          if (
+          const isActiveOpenThread =
             chatOpenRef.current &&
             activeReservationRef.current &&
-            activeReservationRef.current === reservationId &&
+            activeReservationRef.current === reservationId;
+
+          if (
+            isActiveOpenThread &&
             row.id &&
             row.message &&
             row.created_at
@@ -969,6 +1307,14 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
                 },
               ])
             );
+            void markThreadSeen(reservationId, { silent: true });
+          }
+
+          if (isActiveOpenThread) {
+            if (chatOpenRef.current) {
+              void loadReservations(true);
+            }
+            return;
           }
 
           setUnreadByReservation((prev) => {
@@ -1117,13 +1463,8 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
                             type="button"
                             onClick={() => {
                               setChatReservationId(r.id);
-                              setUnreadByReservation((prev) => ({
-                                ...prev,
-                                [r.id]: 0,
-                              }));
-                              if (unread > 0) {
-                                setUnreadThreadCount((prev) => Math.max(0, prev - 1));
-                              }
+                              clearLocalUnreadForReservation(r.id);
+                              void markThreadSeen(r.id, { silent: true });
                             }}
                             className="w-full rounded-xl px-3 py-2 text-left transition cursor-pointer border"
                             style={{
@@ -1382,12 +1723,21 @@ function OperatorChatWidget({ accessToken }: { accessToken: string }) {
 /* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    RESERVATIONS
 â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
-function ReservationsContent({ accessToken }: { accessToken: string }) {
+function ReservationsContent({
+  accessToken,
+  operatorUserId,
+}: {
+  accessToken: string;
+  operatorUserId: string;
+}) {
   const [activeTab, setActiveTab] = useState<'pending' | 'history'>('pending');
   const [loading, setLoading] = useState(true);
   const [actionLoadingId, setActionLoadingId] = useState('');
   const [pendingReservations, setPendingReservations] = useState<OperatorReservationRecord[]>([]);
   const [pastReservations, setPastReservations] = useState<OperatorReservationRecord[]>([]);
+  const [viewModalOpen, setViewModalOpen] = useState(false);
+  const [viewReservation, setViewReservation] = useState<OperatorReservationRecord | null>(null);
+  const [modalActionStatus, setModalActionStatus] = useState<'confirmed' | 'rejected' | null>(null);
 
   const formatPeso = (value: number) =>
     `PHP ${Number(value || 0).toLocaleString('en-PH', {
@@ -1395,10 +1745,65 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
       maximumFractionDigits: 2,
     })}`;
 
-  const loadReservations = async () => {
+  const getSeatText = (reservation: OperatorReservationRecord) => {
+    const seatLabels = Array.isArray(reservation.seat_labels)
+      ? reservation.seat_labels.map((seat) => String(seat || '').trim()).filter(Boolean)
+      : [];
+    if (seatLabels.length > 0) return seatLabels.join(', ');
+    const seatCount = Number(reservation.seat_count || 0);
+    if (seatCount > 0) return `${seatCount} seat(s)`;
+    return '-';
+  };
+
+  const formatReservationStatus = (status?: string | null) => {
+    const normalized = String(status || '').toLowerCase();
+    if (normalized === 'pending_operator_approval') return 'Pending Approval';
+    if (normalized === 'pending_payment') return 'Pending Payment';
+    if (normalized === 'picked_up') return 'Picked Up';
+    if (normalized === 'departed') return 'Departed';
+    if (!normalized) return 'Unknown';
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  };
+
+  const getReservationStatusBadgeStyle = (status?: string | null) => {
+    const normalized = String(status || '').toLowerCase();
+    if (normalized === 'confirmed') {
+      return { background: 'rgba(34,197,94,0.12)', color: '#22c55e' };
+    }
+    if (normalized === 'pending_payment') {
+      return { background: 'rgba(245,158,11,0.12)', color: '#f59e0b' };
+    }
+    if (normalized === 'picked_up' || normalized === 'departed') {
+      return { background: 'rgba(37,151,233,0.12)', color: 'var(--primary)' };
+    }
+    if (normalized === 'rejected' || normalized === 'cancelled') {
+      return { background: 'rgba(239,68,68,0.12)', color: '#ef4444' };
+    }
+    return { background: 'var(--tg-subtle)', color: 'var(--tg-muted)' };
+  };
+
+  const isReviewableStatus = (status?: string | null) => {
+    const normalized = String(status || '').toLowerCase();
+    return normalized === 'pending_operator_approval';
+  };
+
+  const openDetailsModal = (reservation: OperatorReservationRecord) => {
+    setViewReservation(reservation);
+    setViewModalOpen(true);
+  };
+
+  const closeDetailsModal = () => {
+    if (viewReservation && actionLoadingId === viewReservation.id) return;
+    setViewModalOpen(false);
+    setViewReservation(null);
+    setModalActionStatus(null);
+  };
+
+  const loadReservations = useCallback(async (options?: { silent?: boolean }) => {
     if (!accessToken) return;
+    const silent = !!options?.silent;
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const data = await fetchOperatorReservations(accessToken);
       setPendingReservations(data.pending || []);
       setPastReservations(data.history || []);
@@ -1408,17 +1813,53 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
         description: error?.message || 'Please try again.',
       });
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
-  };
-
-  useEffect(() => {
-    void loadReservations();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken]);
 
-  const handleAction = async (reservationId: string, status: 'confirmed' | 'rejected') => {
-    if (!accessToken || !reservationId || actionLoadingId) return;
+  useEffect(() => {
+    void loadReservations({ silent: false });
+  }, [loadReservations]);
+
+  useEffect(() => {
+    if (!accessToken || !operatorUserId) return;
+
+    let refreshTimeout: number | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimeout) return;
+      refreshTimeout = window.setTimeout(() => {
+        refreshTimeout = null;
+        void loadReservations({ silent: true });
+      }, 250);
+    };
+
+    const reservationsChannel = supabase
+      .channel(`operator-reservations-${operatorUserId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_reservations',
+          filter: `operator_user_id=eq.${operatorUserId}`,
+        },
+        scheduleRefresh
+      )
+      .subscribe();
+
+    return () => {
+      if (refreshTimeout) {
+        window.clearTimeout(refreshTimeout);
+      }
+      void supabase.removeChannel(reservationsChannel);
+    };
+  }, [accessToken, operatorUserId, loadReservations]);
+
+  const handleAction = async (
+    reservationId: string,
+    status: 'confirmed' | 'rejected'
+  ) => {
+    if (!accessToken || !reservationId || actionLoadingId) return false;
     try {
       setActionLoadingId(reservationId);
       await updateOperatorReservationStatus({
@@ -1427,17 +1868,30 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
         status,
       });
       sileoToast.success({
-        title: status === 'confirmed' ? 'Reservation confirmed' : 'Reservation rejected',
+        title:
+          status === 'confirmed'
+            ? 'Reservation approved. Waiting for downpayment.'
+            : 'Reservation rejected',
       });
       await loadReservations();
+      return true;
     } catch (error: any) {
       sileoToast.error({
         title: 'Action failed',
         description: error?.message || 'Please try again.',
       });
+      return false;
     } finally {
       setActionLoadingId('');
     }
+  };
+
+  const handleModalAction = async (status: 'confirmed' | 'rejected') => {
+    if (!viewReservation) return;
+    setModalActionStatus(status);
+    const ok = await handleAction(viewReservation.id, status);
+    setModalActionStatus(null);
+    if (ok) closeDetailsModal();
   };
 
 
@@ -1504,7 +1958,7 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
                 <th className="text-left p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">Passenger</th>
                 <th className="text-left p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">Route</th>
                 <th className="text-left p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">
-                  {activeTab === 'pending' ? 'Payment Time' : 'Updated'}
+                  {activeTab === 'pending' ? 'Requested' : 'Updated'}
                 </th>
                 <th className="text-center p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">Seats / Amount</th>
                 <th className="text-right p-4 text-muted-theme font-semibold text-xs uppercase tracking-wider">Action</th>
@@ -1556,17 +2010,19 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
                       <td className="p-4 text-right">
                         <div className="flex items-center justify-end gap-2">
                           <button
-                            disabled={actionLoadingId === res.id}
-                            onClick={() => handleAction(res.id, 'rejected')}
-                            className="p-2 rounded-xl cursor-pointer transition hover:scale-105 disabled:opacity-50"
-                            style={{ background: 'rgba(239,68,68,0.1)', color: '#ef4444' }}>
-                            <X size={16} />
-                          </button>
-                          <button
-                            disabled={actionLoadingId === res.id}
-                            onClick={() => handleAction(res.id, 'confirmed')}
-                            className="btn-primary shadow-none text-xs py-2 px-4 disabled:opacity-50">
-                            <Check size={14} /> Confirm
+                            type="button"
+                            onClick={() => openDetailsModal(res)}
+                            className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition"
+                            style={{
+                              background: 'var(--tg-subtle)',
+                              color: 'var(--primary)',
+                              border: '1px solid var(--tg-border-primary)',
+                            }}
+                          >
+                            <span className="inline-flex items-center gap-1">
+                              <Eye size={13} />
+                              View
+                            </span>
                           </button>
                         </div>
                       </td>
@@ -1596,12 +2052,29 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
                       <span className="text-theme font-medium">{formatPeso(Number(res.amount_due || 0))}</span>
                     </td>
                     <td className="p-4 text-right">
-                      <span className="px-2.5 py-1 rounded-full text-xs font-bold"
-                        style={(res.status || '').toLowerCase() === 'confirmed'
-                          ? { background: 'rgba(34,197,94,0.12)', color: '#22c55e' }
-                          : { background: 'rgba(239,68,68,0.12)', color: '#ef4444' }}>
-                        {String(res.status || '').toLowerCase() === 'confirmed' ? 'Confirmed' : 'Rejected'}
-                      </span>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => openDetailsModal(res)}
+                          className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition"
+                          style={{
+                            background: 'var(--tg-subtle)',
+                            color: 'var(--primary)',
+                            border: '1px solid var(--tg-border-primary)',
+                          }}
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            <Eye size={13} />
+                            View
+                          </span>
+                        </button>
+                        <span
+                          className="px-2.5 py-1 rounded-full text-xs font-bold"
+                          style={getReservationStatusBadgeStyle(res.status)}
+                        >
+                          {formatReservationStatus(res.status)}
+                        </span>
+                      </div>
                     </td>
                   </tr>
                 ))
@@ -1638,19 +2111,16 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
                   </span>
                   <div className="flex gap-2">
                     <button
-                      disabled={actionLoadingId === res.id}
-                      onClick={() => handleAction(res.id, 'rejected')}
-                      className="p-2 rounded-lg disabled:opacity-50"
-                      style={{ background: 'rgba(239,68,68,0.12)', color: '#ef4444' }}
+                      type="button"
+                      onClick={() => openDetailsModal(res)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold"
+                      style={{
+                        background: 'var(--tg-subtle)',
+                        color: 'var(--primary)',
+                        border: '1px solid var(--tg-border-primary)',
+                      }}
                     >
-                      <X size={14} />
-                    </button>
-                    <button
-                      disabled={actionLoadingId === res.id}
-                      onClick={() => handleAction(res.id, 'confirmed')}
-                      className="btn-primary text-xs py-1.5 px-3 disabled:opacity-50"
-                    >
-                      Confirm
+                      View
                     </button>
                   </div>
                 </div>
@@ -1667,10 +2137,144 @@ function ReservationsContent({ accessToken }: { accessToken: string }) {
               <p className="text-theme font-semibold">{res.full_name}</p>
               <p className="text-muted-theme text-xs">{res.route}</p>
               <p className="text-theme text-sm">{formatPeso(Number(res.amount_due || 0))}</p>
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => openDetailsModal(res)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    color: 'var(--primary)',
+                    border: '1px solid var(--tg-border-primary)',
+                  }}
+                >
+                  View
+                </button>
+              </div>
             </div>
           ))
         )}
       </div>
+
+      {viewModalOpen &&
+        viewReservation &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="fixed inset-0 z-[250] flex items-center justify-center px-4 py-4 overflow-y-auto">
+            <button
+              type="button"
+              aria-label="Close reservation details"
+              className="absolute inset-0"
+              style={{ background: 'rgba(2, 8, 23, 0.55)' }}
+              onClick={closeDetailsModal}
+            />
+            <div
+              className="relative w-full max-w-2xl max-h-[calc(100dvh-2rem)] rounded-2xl overflow-hidden flex flex-col my-auto"
+              style={{
+                background: 'var(--tg-card)',
+                border: '1px solid var(--tg-border)',
+                boxShadow: 'var(--tg-shadow)',
+              }}
+            >
+              <div
+                className="px-5 py-4 flex items-start justify-between gap-3"
+                style={{ borderBottom: '1px solid var(--tg-border)' }}
+              >
+                <div>
+                  <h4 className="text-theme font-bold text-base">Reservation Details</h4>
+                  <p className="text-muted-theme text-xs mt-1">
+                    {viewReservation.full_name || 'Passenger'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeDetailsModal}
+                  disabled={actionLoadingId === viewReservation.id}
+                  className="p-2 rounded-lg transition hover:bg-[var(--tg-subtle)] cursor-pointer"
+                  style={{ color: 'var(--tg-muted)' }}
+                >
+                  <CloseIcon size={16} />
+                </button>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto p-5 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Contact</p>
+                  <p className="text-theme font-semibold">{viewReservation.contact_number || '-'}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Route</p>
+                  <p className="text-theme font-semibold">{viewReservation.route || '-'}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Seat Number(s)</p>
+                  <p className="text-theme font-semibold">{getSeatText(viewReservation)}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Downpayment Reference</p>
+                  <p className="text-theme font-semibold">{(viewReservation.payment_id || '').trim() || '-'}</p>
+                </div>
+                <div className="p-3 rounded-xl md:col-span-2" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Pickup Location</p>
+                  <p className="text-theme font-semibold">{viewReservation.pickup_location || '-'}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Amount</p>
+                  <p className="text-theme font-semibold">{formatPeso(Number(viewReservation.amount_due || 0))}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Status</p>
+                  <p className="text-theme font-semibold">{formatReservationStatus(viewReservation.status)}</p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Created</p>
+                  <p className="text-theme font-semibold">
+                    {new Date(viewReservation.created_at).toLocaleString('en-PH')}
+                  </p>
+                </div>
+                <div className="p-3 rounded-xl" style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}>
+                  <p className="text-xs text-muted-theme uppercase mb-1">Paid At</p>
+                  <p className="text-theme font-semibold">
+                    {viewReservation.paid_at
+                      ? new Date(viewReservation.paid_at).toLocaleString('en-PH')
+                      : '-'}
+                  </p>
+                </div>
+              </div>
+              {isReviewableStatus(viewReservation.status) && (
+                <div
+                  className="px-5 py-4 flex items-center justify-end gap-2"
+                  style={{ borderTop: '1px solid var(--tg-border)' }}
+                >
+                  <button
+                    type="button"
+                    disabled={actionLoadingId === viewReservation.id}
+                    onClick={() => void handleModalAction('rejected')}
+                    className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                    style={{ background: 'rgba(239,68,68,0.12)', color: '#ef4444' }}
+                  >
+                    {actionLoadingId === viewReservation.id &&
+                    modalActionStatus === 'rejected'
+                      ? 'Rejecting...'
+                      : 'Reject'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={actionLoadingId === viewReservation.id}
+                    onClick={() => void handleModalAction('confirmed')}
+                    className="btn-primary shadow-none text-xs py-2 px-4 disabled:opacity-50"
+                  >
+                    {actionLoadingId === viewReservation.id &&
+                    modalActionStatus === 'confirmed'
+                      ? 'Confirming...'
+                      : 'Confirm'}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>,
+          document.body
+        )}
 
     </div>
   );
@@ -1683,9 +2287,14 @@ function PassengersContent({
   accessToken: string;
   operatorUserId: string;
 }) {
+  const PASSENGERS_PAGE_SIZE = 10;
   const [loading, setLoading] = useState(true);
   const [queueInfo, setQueueInfo] = useState<OperatorBoardingQueueInfo | null>(null);
   const [passengers, setPassengers] = useState<OperatorBoardingPassenger[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPassengers, setTotalPassengers] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [activeTripKey, setActiveTripKey] = useState<string | null>(null);
   const [rowActionLoadingId, setRowActionLoadingId] = useState<string | null>(null);
   const [mapModalOpen, setMapModalOpen] = useState(false);
   const [mapLoading, setMapLoading] = useState(false);
@@ -1693,6 +2302,9 @@ function PassengersContent({
   const [mapCenter, setMapCenter] = useState<[number, number]>([10.9622, 124.6276]);
   const [mapMarker, setMapMarker] = useState<[number, number] | null>(null);
   const [mapReservation, setMapReservation] = useState<OperatorBoardingPassenger | null>(null);
+  const geocodeCacheRef = React.useRef(
+    new Map<string, { expiresAt: number; coords: [number, number] | null }>()
+  );
 
   const formatPeso = (value: number) =>
     `PHP ${Number(value || 0).toLocaleString('en-PH', {
@@ -1710,6 +2322,107 @@ function PassengersContent({
     return [lat, lng];
   };
 
+  const normalizePickupText = (value: string) =>
+    value
+      .replace(/\s+/g, ' ')
+      .replace(/\b(pick\s*up|pickup|location|loc)\b[:\-]?\s*/gi, '')
+      .trim();
+
+  const routePlacesFromHint = (routeHint: string) => {
+    const cleaned = String(routeHint || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!cleaned) return [];
+
+    const parts = cleaned
+      .split(/\bto\b|->|—|-/i)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    return Array.from(new Set(parts));
+  };
+
+  const geocodeWithNominatim = async (
+    query: string
+  ): Promise<[number, number] | null> => {
+    const normalizedKey = query.trim().toLowerCase();
+    const now = Date.now();
+    const cached = geocodeCacheRef.current.get(normalizedKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.coords;
+    }
+
+    if (geocodeCacheRef.current.size > GEOCODE_CACHE_MAX_ENTRIES) {
+      geocodeCacheRef.current.clear();
+    }
+
+    const q = encodeURIComponent(query);
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${q}&limit=5&countrycodes=ph&addressdetails=1`,
+      {
+        headers: {
+          'Accept-Language': 'en',
+        },
+      }
+    );
+    if (!response.ok) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
+
+    const rows = (await response.json()) as Array<{
+      lat?: string;
+      lon?: string;
+      display_name?: string;
+    }>;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
+
+    const preferred = rows.find((row) =>
+      String(row.display_name || '')
+        .toLowerCase()
+        .includes('leyte')
+    );
+    const winner = preferred || rows[0];
+    if (!winner?.lat || !winner?.lon) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
+
+    const lat = Number(winner.lat);
+    const lng = Number(winner.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      geocodeCacheRef.current.set(normalizedKey, {
+        coords: null,
+        expiresAt: now + 60 * 1000,
+      });
+      return null;
+    }
+    const coords: [number, number] = [lat, lng];
+    geocodeCacheRef.current.set(normalizedKey, {
+      coords,
+      expiresAt: now + GEOCODE_CACHE_TTL_MS,
+    });
+    return coords;
+  };
+
   const resolvePickupCoordinates = async (
     pickupLocation: string,
     routeHint: string
@@ -1717,51 +2430,87 @@ function PassengersContent({
     const parsed = parseCoordinatesFromText(pickupLocation);
     if (parsed) return parsed;
 
-    const queryParts = [pickupLocation.trim(), routeHint.trim(), 'Leyte, Philippines'].filter(
-      Boolean
-    );
-    if (queryParts.length === 0) return null;
+    const pickup = normalizePickupText(pickupLocation);
+    if (!pickup) return null;
 
-    const q = encodeURIComponent(queryParts.join(', '));
-    const response = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${q}&limit=1`,
-      { cache: 'no-store' }
+    const routePlaces = routePlacesFromHint(routeHint);
+    const queries = Array.from(
+      new Set(
+        [
+          pickup,
+          `${pickup}, Isabel, Leyte, Philippines`,
+          `${pickup}, Leyte, Philippines`,
+          `${pickup}, Philippines`,
+          ...routePlaces.map((place) => `${pickup}, ${place}, Leyte, Philippines`),
+          ...routePlaces.map((place) => `${pickup}, ${place}, Philippines`),
+        ]
+          .map((item) => item.trim())
+          .filter(Boolean)
+      )
     );
-    if (!response.ok) return null;
 
-    const rows = (await response.json()) as Array<{ lat?: string; lon?: string }>;
-    const first = rows?.[0];
-    if (!first?.lat || !first?.lon) return null;
-    const lat = Number(first.lat);
-    const lng = Number(first.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-    return [lat, lng];
+    for (const query of queries) {
+      try {
+        const coords = await geocodeWithNominatim(query);
+        if (coords) return coords;
+      } catch {
+        // Try next query variant.
+      }
+    }
+
+    return null;
   };
 
-  const loadPassengers = useCallback(async (silent = false) => {
-    if (!accessToken) return;
-    try {
-      if (!silent) setLoading(true);
-      const result = await fetchOperatorBoardingPassengers(accessToken);
-      setQueueInfo(result.queue || null);
-      setPassengers(result.passengers || []);
-    } catch (err: unknown) {
-      if (!silent) {
-        sileoToast.error({
-          title: 'Failed to load passengers',
-          description: err instanceof Error ? err.message : 'Please try again.',
+  const loadPassengers = useCallback(
+    async (options?: { silent?: boolean; page?: number }) => {
+      if (!accessToken) return;
+      const silent = !!options?.silent;
+      const targetPage = Math.max(1, Number(options?.page || currentPage || 1));
+      try {
+        if (!silent) setLoading(true);
+        const result = await fetchOperatorBoardingPassengers(accessToken, {
+          page: targetPage,
+          pageSize: PASSENGERS_PAGE_SIZE,
         });
+        setQueueInfo(result.queue || null);
+        setPassengers(result.passengers || []);
+        setActiveTripKey(result.activeTripKey || null);
+
+        const pageInfo = result.pagination;
+        const nextTotal = Number(pageInfo?.total || 0);
+        const nextTotalPages = Math.max(1, Number(pageInfo?.totalPages || 1));
+        const nextPage = Math.min(
+          nextTotalPages,
+          Math.max(1, Number(pageInfo?.page || targetPage))
+        );
+
+        setTotalPassengers(nextTotal);
+        setTotalPages(nextTotalPages);
+        if (nextPage !== currentPage) {
+          setCurrentPage(nextPage);
+        }
+      } catch (err: unknown) {
+        if (!silent) {
+          sileoToast.error({
+            title: 'Failed to load passengers',
+            description: err instanceof Error ? err.message : 'Please try again.',
+          });
+        }
+        setQueueInfo(null);
+        setPassengers([]);
+        setActiveTripKey(null);
+        setTotalPassengers(0);
+        setTotalPages(1);
+      } finally {
+        if (!silent) setLoading(false);
       }
-      setQueueInfo(null);
-      setPassengers([]);
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  }, [accessToken]);
+    },
+    [accessToken, currentPage]
+  );
 
   useEffect(() => {
-    void loadPassengers(false);
-  }, [loadPassengers]);
+    void loadPassengers({ silent: false, page: currentPage });
+  }, [loadPassengers, currentPage]);
 
   useEffect(() => {
     if (!accessToken || !operatorUserId) return;
@@ -1771,7 +2520,7 @@ function PassengersContent({
       if (refreshTimeout) return;
       refreshTimeout = window.setTimeout(() => {
         refreshTimeout = null;
-        void loadPassengers(true);
+        void loadPassengers({ silent: true, page: currentPage });
       }, 250);
     };
 
@@ -1810,7 +2559,7 @@ function PassengersContent({
       void supabase.removeChannel(reservationsChannel);
       void supabase.removeChannel(queueChannel);
     };
-  }, [accessToken, operatorUserId, loadPassengers]);
+  }, [accessToken, operatorUserId, loadPassengers, currentPage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1870,6 +2619,14 @@ function PassengersContent({
   };
 
   const handlePickedUp = async (row: OperatorBoardingPassenger) => {
+    const queueStatus = String(queueInfo?.status || '').toLowerCase();
+    if (queueStatus !== 'departed') {
+      sileoToast.warning({
+        title: 'Pickup locked',
+        description: 'Mark the van as departed first before marking passengers as picked up.',
+      });
+      return;
+    }
     try {
       setRowActionLoadingId(row.id);
       await updateOperatorReservationStatus({
@@ -1881,7 +2638,7 @@ function PassengersContent({
         title: 'Passenger marked as picked up',
         description: `${row.full_name || 'Passenger'} was moved to completed pickup.`,
       });
-      await loadPassengers(true);
+      await loadPassengers({ silent: true, page: currentPage });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Please try again.';
       sileoToast.error({
@@ -1900,11 +2657,11 @@ function PassengersContent({
           <div>
             <h3 className="text-theme font-bold text-lg">Queue Passengers</h3>
             <p className="text-muted-theme text-sm">
-              Latest reservations for your current queued or boarding van
+              Latest reservations for your current departed, queued, or boarding van
             </p>
           </div>
           <button
-            onClick={() => void loadPassengers(false)}
+            onClick={() => void loadPassengers({ silent: false, page: currentPage })}
             disabled={loading}
             className="px-3 py-2 rounded-xl text-xs font-semibold cursor-pointer"
             style={{
@@ -1919,40 +2676,52 @@ function PassengersContent({
         </div>
 
         {queueInfo ? (
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div
-              className="p-3 rounded-xl"
-              style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
-            >
-              <p className="text-xs text-muted-theme uppercase mb-1">Route</p>
-              <p className="text-sm font-semibold text-theme">{queueInfo.route || '-'}</p>
+          <>
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div
+                className="p-3 rounded-xl"
+                style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
+              >
+                <p className="text-xs text-muted-theme uppercase mb-1">Route</p>
+                <p className="text-sm font-semibold text-theme">{queueInfo.route || '-'}</p>
+              </div>
+              <div
+                className="p-3 rounded-xl"
+                style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
+              >
+                <p className="text-xs text-muted-theme uppercase mb-1">Plate</p>
+                <p className="text-sm font-semibold text-theme">{queueInfo.plate_number || '-'}</p>
+              </div>
+              <div
+                className="p-3 rounded-xl"
+                style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
+              >
+                <p className="text-xs text-muted-theme uppercase mb-1">Departure</p>
+                <p className="text-sm font-semibold text-theme">
+                  {queueInfo.departure_time
+                    ? new Date(queueInfo.departure_time).toLocaleString('en-PH')
+                    : 'TBD'}
+                </p>
+              </div>
             </div>
-            <div
-              className="p-3 rounded-xl"
-              style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
-            >
-              <p className="text-xs text-muted-theme uppercase mb-1">Plate</p>
-              <p className="text-sm font-semibold text-theme">{queueInfo.plate_number || '-'}</p>
-            </div>
-            <div
-              className="p-3 rounded-xl"
-              style={{ background: 'var(--tg-bg-alt)', border: '1px solid var(--tg-border)' }}
-            >
-              <p className="text-xs text-muted-theme uppercase mb-1">Departure</p>
-              <p className="text-sm font-semibold text-theme">
-                {queueInfo.departure_time
-                  ? new Date(queueInfo.departure_time).toLocaleString('en-PH')
-                  : 'TBD'}
+            {activeTripKey && (
+              <p className="mt-3 text-xs text-muted-theme">
+                Showing reservations for this exact trip slot only.
               </p>
-            </div>
-          </div>
+            )}
+            {String(queueInfo.status || '').toLowerCase() !== 'departed' && (
+              <p className="mt-2 text-xs" style={{ color: '#f59e0b' }}>
+                `Picked Up` will unlock after you mark this van as `Departed` in My Vehicle.
+              </p>
+            )}
+          </>
         ) : (
-          <div
-            className="mt-4 p-4 rounded-xl text-sm"
-            style={{ background: 'rgba(245,158,11,0.12)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.35)' }}
-          >
-            You are not in queue yet. Set your queue status to Queued or Boarding in My Vehicle tab.
-          </div>
+            <div
+              className="mt-4 p-4 rounded-xl text-sm"
+              style={{ background: 'rgba(245,158,11,0.12)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.35)' }}
+            >
+              You are not in queue yet. Set your queue status to Queued or Boarding in My Vehicle tab.
+            </div>
         )}
       </div>
 
@@ -1988,13 +2757,13 @@ function PassengersContent({
               ) : !queueInfo ? (
                 <tr>
                   <td className="p-6 text-muted-theme" colSpan={5}>
-                    No active queued/boarding van.
+                    No active departed/queued/boarding van.
                   </td>
                 </tr>
               ) : passengers.length === 0 ? (
                 <tr>
                   <td className="p-6 text-muted-theme" colSpan={5}>
-                    No passengers yet for this queued/boarding trip.
+                    No passengers yet for this departed/queued/boarding trip.
                   </td>
                 </tr>
               ) : (
@@ -2041,7 +2810,10 @@ function PassengersContent({
                         <button
                           type="button"
                           onClick={() => void handlePickedUp(row)}
-                          disabled={rowActionLoadingId === row.id}
+                          disabled={
+                            rowActionLoadingId === row.id ||
+                            String(queueInfo?.status || '').toLowerCase() !== 'departed'
+                          }
                           className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
                           style={{
                             background: 'rgba(34,197,94,0.14)',
@@ -2049,7 +2821,12 @@ function PassengersContent({
                             border: '1px solid rgba(34,197,94,0.35)',
                           }}
                         >
-                          {rowActionLoadingId === row.id ? 'Saving...' : 'Picked Up'}
+                          {rowActionLoadingId === row.id
+                            ? 'Saving...'
+                            : String(queueInfo?.status || '').toLowerCase() ===
+                                'departed'
+                              ? 'Picked Up'
+                              : 'Depart First'}
                         </button>
                       </div>
                     </td>
@@ -2059,6 +2836,55 @@ function PassengersContent({
             </tbody>
           </table>
         </div>
+        {queueInfo && (
+          <div
+            className="px-4 py-3 flex items-center justify-between gap-3"
+            style={{ borderTop: '1px solid var(--tg-border)' }}
+          >
+            <p className="text-xs text-muted-theme">
+              Page {currentPage} of {totalPages} • {totalPassengers} passenger
+              {totalPassengers === 1 ? '' : 's'}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  void loadPassengers({
+                    silent: false,
+                    page: Math.max(1, currentPage - 1),
+                  })
+                }
+                disabled={loading || currentPage <= 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  color: 'var(--primary)',
+                  border: '1px solid var(--tg-border-primary)',
+                }}
+              >
+                Prev
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void loadPassengers({
+                    silent: false,
+                    page: Math.min(totalPages, currentPage + 1),
+                  })
+                }
+                disabled={loading || currentPage >= totalPages}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  color: 'var(--primary)',
+                  border: '1px solid var(--tg-border-primary)',
+                }}
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {mapModalOpen &&
@@ -2174,57 +3000,75 @@ function MyVehicleContent({
   const [seatMap, setSeatMap] = useState<OperatorSeatMapItem[]>([]);
   const [selectedSeatLabel, setSelectedSeatLabel] = useState('');
   const [walkInName, setWalkInName] = useState('');
+  const [walkInIsDiscounted, setWalkInIsDiscounted] = useState(false);
 
-  const loadQueue = async (isManual = false) => {
-    try {
-      if (isManual) {
-        setRefreshing(true);
-      } else {
-        setQueueLoading(true);
+  const matchesCurrentOperator = useCallback(
+    (row: QueueEntry) =>
+      (operatorUserId && row.operatorUserId === operatorUserId) ||
+      (!!operatorEmail &&
+        row.operatorEmail?.toLowerCase() === operatorEmail.toLowerCase()),
+    [operatorEmail, operatorUserId]
+  );
+
+  const pickMyQueueEntry = useCallback(
+    (rows: QueueEntry[]) => {
+      const mine = rows.filter((row) => matchesCurrentOperator(row));
+      if (mine.length === 0) return null;
+      return [...mine].sort((a, b) => {
+        const aRank = a.status === 'boarding' ? 0 : 1;
+        const bRank = b.status === 'boarding' ? 0 : 1;
+        if (aRank !== bRank) return aRank - bRank;
+        if (a.position !== b.position) return a.position - b.position;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      })[0];
+    },
+    [matchesCurrentOperator]
+  );
+
+  const loadQueue = useCallback(
+    async (isManual = false) => {
+      try {
+        if (isManual) {
+          setRefreshing(true);
+        } else {
+          setQueueLoading(true);
+        }
+        const rows = await fetchActiveQueue();
+        setQueueRows(rows || []);
+        const mine = pickMyQueueEntry(rows || []);
+        if (mine) {
+          setRoute(mine.route || '');
+          setDriverName(mine.driver || '');
+          setPlateNumber(mine.plate || '');
+        }
+      } catch (err: any) {
+        sileoToast.error({
+          title: 'Queue load failed',
+          description: err?.message || 'Unable to fetch queue.',
+        });
+      } finally {
+        if (isManual) {
+          setRefreshing(false);
+        } else {
+          setQueueLoading(false);
+        }
       }
-      const rows = await fetchActiveQueue();
-      setQueueRows(rows || []);
-      const mine = (rows || []).find(
-        (r) =>
-          (operatorUserId && r.operatorUserId === operatorUserId) ||
-          (!!operatorEmail &&
-            r.operatorEmail?.toLowerCase() === operatorEmail.toLowerCase())
-      );
-      if (mine) {
-        setRoute(mine.route || '');
-        setDriverName(mine.driver || '');
-        setPlateNumber(mine.plate || '');
-      }
-    } catch (err: any) {
-      sileoToast.error({
-        title: 'Queue load failed',
-        description: err?.message || 'Unable to fetch queue.',
-      });
-    } finally {
-      if (isManual) {
-        setRefreshing(false);
-      } else {
-        setQueueLoading(false);
-      }
-    }
-  };
+    },
+    [pickMyQueueEntry]
+  );
 
   useEffect(() => {
     if (!operatorEmail && !operatorUserId) return;
     setDriverName(operatorName || '');
     void loadQueue();
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadQueue();
-    }, 300000);
+    }, MY_VEHICLE_QUEUE_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [operatorEmail, operatorName, operatorUserId]);
+  }, [operatorEmail, operatorName, operatorUserId, loadQueue]);
 
-  const myQueue = queueRows.find(
-    (r) =>
-      (operatorUserId && r.operatorUserId === operatorUserId) ||
-      (!!operatorEmail &&
-        r.operatorEmail?.toLowerCase() === operatorEmail.toLowerCase())
-  );
+  const myQueue = pickMyQueueEntry(queueRows);
   const inQueue = !!myQueue;
   const tripDate = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const tripKey =
@@ -2316,6 +3160,7 @@ function MyVehicleContent({
           tripKey,
           seatLabel: selectedSeatLabel,
           passengerName: walkInName.trim(),
+          isDiscounted: walkInIsDiscounted,
           queueId: myQueue.id,
         }),
       });
@@ -2327,6 +3172,7 @@ function MyVehicleContent({
       setSeatMap((result?.seats || []) as OperatorSeatMapItem[]);
       setSelectedSeatLabel('');
       setWalkInName('');
+      setWalkInIsDiscounted(false);
       sileoToast.success({ title: 'Seat marked occupied' });
     } catch (err: any) {
       sileoToast.error({
@@ -2377,8 +3223,9 @@ function MyVehicleContent({
 
     void loadSeatMap(false);
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadSeatMap(false, true);
-    }, 15000);
+    }, MY_VEHICLE_SEATMAP_REFRESH_MS);
 
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2423,6 +3270,8 @@ function MyVehicleContent({
         },
         body: JSON.stringify({
           action,
+          queueId:
+            action === 'leave' || action === 'boarding' ? myQueue?.id : undefined,
           route: route.trim(),
           driverName: driverName.trim(),
           departureTime: departureTime.trim(),
@@ -2607,25 +3456,6 @@ function MyVehicleContent({
             </button>
           ) : (
             <>
-              {myQueue?.status !== 'boarding' && (
-                <button
-                  onClick={() =>
-                    runQueueAction('boarding', 'Status updated to boarding')
-                  }
-                  disabled={
-                    actionLoading || queueLoading || (myQueue?.position || 0) !== 1
-                  }
-                  className="px-4 py-2 rounded-xl text-sm font-semibold cursor-pointer"
-                  style={{
-                    background: 'rgba(245,158,11,0.12)',
-                    color: '#f59e0b',
-                    border: '1px solid rgba(245,158,11,0.35)',
-                    opacity: (myQueue?.position || 0) === 1 ? 1 : 0.55,
-                  }}
-                >
-                  Set Boarding
-                </button>
-              )}
               <button
                 onClick={() =>
                   runQueueAction(
@@ -2648,9 +3478,9 @@ function MyVehicleContent({
             </>
           )}
         </div>
-        {inQueue && myQueue?.status !== 'boarding' && (myQueue?.position || 0) !== 1 && (
+        {inQueue && (
           <p className="text-xs mt-3" style={{ color: 'var(--tg-muted)' }}>
-            Waiting turn: only queue position #1 can set boarding.
+            Auto-boarding is enabled: queue position #1 is automatically set to boarding.
           </p>
         )}
       </div>
@@ -2732,7 +3562,13 @@ function MyVehicleContent({
                     }
                     title={
                       seat?.passengerName
-                        ? `${seat.passengerName} (${seat.source === 'walk_in' ? 'walk-in' : 'reservation'})`
+                        ? `${seat.passengerName} (${
+                            seat.source === 'walk_in'
+                              ? seat.walkInDiscounted
+                                ? 'walk-in discounted'
+                                : 'walk-in regular'
+                              : 'reservation'
+                          })`
                         : `Seat ${label}`
                     }
                   >
@@ -2750,6 +3586,15 @@ function MyVehicleContent({
                 className="input-dark w-full"
                 disabled={seatActionLoading || seatMapLoading}
               />
+              <select
+                value={walkInIsDiscounted ? 'discounted' : 'regular'}
+                onChange={(e) => setWalkInIsDiscounted(e.target.value === 'discounted')}
+                disabled={seatActionLoading || seatMapLoading}
+                className="input-dark w-full md:w-56"
+              >
+                <option value="regular">Regular Fare</option>
+                <option value="discounted">Discounted Fare</option>
+              </select>
               <button
                 onClick={() => void markSeatAsWalkIn()}
                 disabled={!selectedSeatLabel || !walkInName.trim() || seatActionLoading || seatMapLoading}
@@ -2784,7 +3629,12 @@ function MyVehicleContent({
                           Seat {seat.seatLabel} - {seat.passengerName || 'Passenger'}
                         </p>
                         <p className="text-muted-theme text-xs uppercase">
-                          {seat.source === 'walk_in' ? 'walk-in' : 'online reservation'} | {seat.status}
+                          {seat.source === 'walk_in'
+                            ? seat.walkInDiscounted
+                              ? 'walk-in discounted'
+                              : 'walk-in regular'
+                            : 'online reservation'}{' '}
+                          | {seat.status}
                         </p>
                       </div>
                       {seat.source === 'walk_in' && (
@@ -2852,23 +3702,53 @@ function MyVehicleContent({
   );
 }
 function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
+  const PAYMENTS_PAGE_SIZE = 10;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [summary, setSummary] = useState({ today: 0, week: 0, month: 0 });
+  const [ratingSummary, setRatingSummary] = useState<OperatorRatingSummaryResult>({
+    average_rating: 0,
+    review_count: 0,
+    trusted: false,
+    recent_feedback: [],
+  });
   const [payments, setPayments] = useState<OperatorPaymentRecord[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalPayments, setTotalPayments] = useState(0);
 
   useEffect(() => {
     if (!accessToken) return;
     let cancelled = false;
+    const targetPage = Math.max(1, currentPage);
 
     const load = async () => {
       try {
         setLoading(true);
         setError('');
-        const data = await fetchOperatorPaymentHistory(accessToken);
+        const [paymentData, operatorRatingData] = await Promise.all([
+          fetchOperatorPaymentHistory(accessToken, {
+            page: targetPage,
+            pageSize: PAYMENTS_PAGE_SIZE,
+          }),
+          fetchOperatorRatingSummary(accessToken),
+        ]);
         if (cancelled) return;
-        setSummary(data.summary);
-        setPayments(data.payments || []);
+        setSummary(paymentData.summary);
+        setPayments(paymentData.payments || []);
+        setRatingSummary(operatorRatingData);
+        const pageInfo = paymentData.pagination;
+        const nextTotal = Number(pageInfo?.total || 0);
+        const nextTotalPages = Math.max(1, Number(pageInfo?.totalPages || 1));
+        const nextPage = Math.min(
+          nextTotalPages,
+          Math.max(1, Number(pageInfo?.page || targetPage))
+        );
+        setTotalPayments(nextTotal);
+        setTotalPages(nextTotalPages);
+        if (nextPage !== currentPage) {
+          setCurrentPage(nextPage);
+        }
       } catch (err: any) {
         if (cancelled) return;
         setError(err?.message || 'Failed to load payment history.');
@@ -2881,7 +3761,7 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
     return () => {
       cancelled = true;
     };
-  }, [accessToken]);
+  }, [accessToken, currentPage]);
 
   const formatPeso = (value: number) =>
     `PHP ${Number(value || 0).toLocaleString('en-PH', {
@@ -2891,7 +3771,7 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
 
   return (
     <div className="admin-tab space-y-6">
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           { label: 'Today', value: formatPeso(summary.today), color: 'var(--primary)' },
           { label: 'This Week', value: formatPeso(summary.week), color: '#22c55e' },
@@ -2905,6 +3785,93 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
             </div>
           </div>
         ))}
+        <div className="card-glow p-5 rounded-2xl">
+          <p className="text-xs text-muted-theme font-semibold uppercase tracking-wider mb-1">
+            Operator Rating
+          </p>
+          <div className="flex items-center gap-2">
+            <Star size={18} style={{ color: '#f59e0b', fill: '#f59e0b' }} />
+            <p className="text-2xl font-extrabold text-theme">
+              {Number(ratingSummary.average_rating || 0).toFixed(1)}
+            </p>
+            <span className="text-sm text-muted-theme">/ 5</span>
+          </div>
+          <p className="text-xs text-muted-theme mt-1">
+            {ratingSummary.review_count} review
+            {ratingSummary.review_count === 1 ? '' : 's'}
+          </p>
+          <div className="mt-3">
+            <span
+              className="px-2.5 py-1 rounded-full text-[11px] font-semibold"
+              style={
+                ratingSummary.trusted
+                  ? {
+                      background: 'rgba(34,197,94,0.12)',
+                      color: '#22c55e',
+                    }
+                  : {
+                      background: 'rgba(59,130,246,0.12)',
+                      color: 'var(--primary)',
+                    }
+              }
+            >
+              {ratingSummary.trusted ? 'Trusted Operator' : 'Building Trust'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="card-glow p-6 rounded-2xl">
+        <h3 className="text-theme font-bold text-lg mb-4">Recent Passenger Feedback</h3>
+        {loading ? (
+          <p className="text-sm text-muted-theme">Loading feedback...</p>
+        ) : ratingSummary.recent_feedback.length === 0 ? (
+          <p className="text-sm text-muted-theme">
+            No feedback yet. Ratings from commuters will appear here.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {ratingSummary.recent_feedback.slice(0, 5).map((row) => (
+              <div
+                key={row.id}
+                className="rounded-xl p-3"
+                style={{
+                  background: 'var(--tg-bg-alt)',
+                  border: '1px solid var(--tg-border)',
+                }}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-theme">
+                    {row.commuter_name || 'Commuter'}
+                  </p>
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: 5 }, (_, idx) => {
+                      const active = idx < Number(row.rating || 0);
+                      return (
+                        <Star
+                          key={`${row.id}-star-${idx + 1}`}
+                          size={13}
+                          style={{
+                            color: active ? '#f59e0b' : '#9ca3af',
+                            fill: active ? '#f59e0b' : 'transparent',
+                          }}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+                {row.feedback && (
+                  <p className="text-xs text-muted-theme mt-1.5 leading-relaxed">
+                    {row.feedback}
+                  </p>
+                )}
+                <p className="text-[11px] text-muted-theme mt-2">
+                  {new Date(row.created_at).toLocaleString('en-PH')}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card-glow p-6 rounded-2xl">
@@ -2921,41 +3888,586 @@ function IncomeHistoryContent({ accessToken }: { accessToken: string }) {
         ) : payments.length === 0 ? (
           <p className="text-sm text-muted-theme">No paid reservations yet.</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr style={{ borderBottom: '2px solid var(--tg-border)' }}>
-                  <th className="text-left p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Passenger</th>
-                  <th className="text-left p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Route</th>
-                  <th className="text-center p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Seats</th>
-                  <th className="text-right p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Amount</th>
-                  <th className="text-right p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Paid Date</th>
-                </tr>
-              </thead>
-              <tbody>
-                {payments.map((payment) => (
-                  <tr
-                    key={payment.id}
-                    style={{ borderBottom: '1px solid var(--tg-border)' }}
-                    className="hover:bg-[var(--tg-subtle)] transition-colors"
-                  >
-                    <td className="p-3 text-theme font-medium">{payment.passenger}</td>
-                    <td className="p-3 text-theme">{payment.route}</td>
-                    <td className="p-3 text-center">
-                      <span className="step-badge text-xs">{payment.seats}</span>
-                    </td>
-                    <td className="p-3 text-right font-bold" style={{ color: '#22c55e' }}>
-                      {formatPeso(payment.amount)}
-                    </td>
-                    <td className="p-3 text-right text-muted-theme">
-                      {new Date(payment.paidAt || payment.createdAt).toLocaleString('en-PH')}
-                    </td>
+          <div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr style={{ borderBottom: '2px solid var(--tg-border)' }}>
+                    <th className="text-left p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Passenger</th>
+                    <th className="text-left p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Route</th>
+                    <th className="text-center p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Seats</th>
+                    <th className="text-right p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Amount</th>
+                    <th className="text-right p-3 text-muted-theme font-semibold text-xs uppercase tracking-wider">Paid Date</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {payments.map((payment) => (
+                    <tr
+                      key={payment.id}
+                      style={{ borderBottom: '1px solid var(--tg-border)' }}
+                      className="hover:bg-[var(--tg-subtle)] transition-colors"
+                    >
+                      <td className="p-3 text-theme font-medium">{payment.passenger}</td>
+                      <td className="p-3 text-theme">{payment.route}</td>
+                      <td className="p-3 text-center">
+                        <span className="step-badge text-xs">{payment.seats}</span>
+                      </td>
+                      <td className="p-3 text-right font-bold" style={{ color: '#22c55e' }}>
+                        {formatPeso(payment.amount)}
+                      </td>
+                      <td className="p-3 text-right text-muted-theme">
+                        {new Date(payment.paidAt || payment.createdAt).toLocaleString('en-PH')}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div
+              className="mt-3 px-1 flex items-center justify-between gap-3"
+              style={{ borderTop: '1px solid var(--tg-border)' }}
+            >
+              <p className="text-xs text-muted-theme pt-3">
+                Page {currentPage} of {totalPages} • {totalPayments} payment
+                {totalPayments === 1 ? '' : 's'}
+              </p>
+              <div className="flex items-center gap-2 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                  disabled={loading || currentPage <= 1}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    color: 'var(--primary)',
+                    border: '1px solid var(--tg-border-primary)',
+                  }}
+                >
+                  Prev
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                  disabled={loading || currentPage >= totalPages}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition disabled:opacity-50"
+                  style={{
+                    background: 'var(--tg-subtle)',
+                    color: 'var(--primary)',
+                    border: '1px solid var(--tg-border-primary)',
+                  }}
+                >
+                  Next
+                </button>
+              </div>
+            </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function OperatorSettingsContent({
+  accessToken,
+  operatorUserId,
+  displayName,
+  displayEmail,
+  displayAvatarUrl,
+  uiSettings,
+  onUiSettingsChange,
+  onProfileSaved,
+  statusSnapshot,
+  statusLoading,
+  onStatusChanged,
+}: {
+  accessToken: string;
+  operatorUserId: string;
+  displayName: string;
+  displayEmail: string;
+  displayAvatarUrl: string;
+  uiSettings: OperatorUiSettings;
+  onUiSettingsChange: (next: OperatorUiSettings) => void;
+  onProfileSaved: (nextProfile: OperatorProfileResult) => void;
+  statusSnapshot: OperatorPaymentAccountStatusResult | null;
+  statusLoading?: boolean;
+  onStatusChanged: (nextStatus: OperatorPaymentAccountStatusResult) => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [status, setStatus] = useState<OperatorPaymentAccountStatusResult | null>(
+    statusSnapshot
+  );
+  const [secretKey, setSecretKey] = useState('');
+  const [webhookSecret, setWebhookSecret] = useState('');
+  const [showSecret, setShowSecret] = useState(false);
+  const [showWebhook, setShowWebhook] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState('');
+  const [fullName, setFullName] = useState(displayName || '');
+  const [email, setEmail] = useState(displayEmail || '');
+  const [avatarUrl, setAvatarUrl] = useState(displayAvatarUrl || '');
+  const [contactNumber, setContactNumber] = useState('');
+
+  const loadStatus = useCallback(
+    async (silent = false) => {
+      if (!accessToken) return;
+      try {
+        if (!silent) setLoading(true);
+        setError('');
+        const nextStatus = await fetchOperatorPaymentAccountStatus(accessToken);
+        setStatus(nextStatus);
+        onStatusChanged(nextStatus);
+      } catch (err: any) {
+        if (!silent) {
+          setError(err?.message || 'Failed to load payout setup status.');
+        }
+      } finally {
+        if (!silent) setLoading(false);
+      }
+    },
+    [accessToken, onStatusChanged]
+  );
+
+  const loadProfile = useCallback(
+    async (silent = false) => {
+      if (!accessToken || !operatorUserId) return;
+      try {
+        if (!silent) setProfileLoading(true);
+        setProfileError('');
+        const profile = await fetchOperatorProfile(accessToken);
+        setFullName(profile.fullName || '');
+        setEmail(profile.email || '');
+        setAvatarUrl(profile.avatarUrl || '');
+        setContactNumber(profile.contactNumber || '');
+      } catch (err: any) {
+        if (!silent) {
+          setProfileError(err?.message || 'Failed to load profile.');
+        }
+      } finally {
+        if (!silent) setProfileLoading(false);
+      }
+    },
+    [accessToken, operatorUserId]
+  );
+
+  useEffect(() => {
+    setStatus(statusSnapshot);
+  }, [statusSnapshot]);
+
+  useEffect(() => {
+    setFullName(displayName || '');
+    setEmail(displayEmail || '');
+    setAvatarUrl(displayAvatarUrl || '');
+  }, [displayName, displayEmail, displayAvatarUrl]);
+
+  useEffect(() => {
+    if (statusSnapshot) return;
+    void loadStatus(false);
+  }, [statusSnapshot, loadStatus]);
+
+  useEffect(() => {
+    void loadProfile(false);
+  }, [loadProfile]);
+
+  const handleSaveProfile = async () => {
+    if (!fullName.trim()) {
+      setProfileError('Full name is required.');
+      return;
+    }
+
+    try {
+      setProfileSaving(true);
+      setProfileError('');
+      const profile = await saveOperatorProfile({
+        accessToken,
+        fullName: fullName.trim(),
+        avatarUrl: avatarUrl.trim(),
+        contactNumber: contactNumber.trim(),
+      });
+      setFullName(profile.fullName || '');
+      setEmail(profile.email || '');
+      setAvatarUrl(profile.avatarUrl || '');
+      setContactNumber(profile.contactNumber || '');
+      onProfileSaved(profile);
+      sileoToast.success({
+        title: 'Profile saved',
+        description: 'Your operator profile was updated successfully.',
+      });
+    } catch (err: any) {
+      const message = err?.message || 'Failed to save profile.';
+      setProfileError(message);
+      sileoToast.error({
+        title: 'Profile save failed',
+        description: message,
+      });
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!secretKey.trim()) {
+      setError('PayMongo Secret Key is required.');
+      return;
+    }
+
+    try {
+      setSaving(true);
+      setError('');
+      const nextStatus = await saveOperatorPaymentAccount({
+        accessToken,
+        paymongoSecretKey: secretKey.trim(),
+        paymongoWebhookSecret: webhookSecret.trim(),
+      });
+      setStatus(nextStatus);
+      onStatusChanged(nextStatus);
+      setSecretKey('');
+      setWebhookSecret('');
+      sileoToast.success({
+        title: 'Payout setup saved',
+        description:
+          'Your PayMongo account is now configured for operator downpayments.',
+      });
+    } catch (err: any) {
+      const message = err?.message || 'Failed to save payout setup.';
+      setError(message);
+      sileoToast.error({
+        title: 'Save failed',
+        description: message,
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const effectiveLoading = loading || !!statusLoading;
+
+  return (
+    <div className="admin-tab space-y-6">
+      <div className="card-glow p-5 rounded-2xl">
+        <h3 className="text-theme font-bold text-lg">Operator Profile</h3>
+        <p className="text-sm text-muted-theme mt-1">
+          Keep your profile details updated for operator records.
+        </p>
+
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              Full Name
+            </label>
+            <Input
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+              placeholder="Operator full name"
+              className="input-dark"
+              disabled={profileSaving || profileLoading}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              Contact Number
+            </label>
+            <Input
+              value={contactNumber}
+              onChange={(e) => setContactNumber(e.target.value)}
+              placeholder="+63..."
+              className="input-dark"
+              disabled={profileSaving || profileLoading}
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              Email
+            </label>
+            <Input value={email} disabled className="input-dark opacity-70" />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              Avatar URL
+            </label>
+            <Input
+              value={avatarUrl}
+              onChange={(e) => setAvatarUrl(e.target.value)}
+              placeholder="https://... or /images/profile.png"
+              className="input-dark"
+              disabled={profileSaving || profileLoading}
+            />
+          </div>
+        </div>
+
+        {profileError && (
+          <p className="text-sm mt-3" style={{ color: '#ef4444' }}>
+            {profileError}
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSaveProfile}
+            disabled={profileSaving || profileLoading}
+            className="btn-primary text-sm px-4 py-2 disabled:opacity-60"
+          >
+            {profileSaving ? 'Saving...' : 'Save Profile'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadProfile(false)}
+            disabled={profileSaving || profileLoading}
+            className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
+            style={{
+              background: 'var(--tg-subtle)',
+              color: 'var(--primary)',
+              border: '1px solid var(--tg-border-primary)',
+            }}
+          >
+            Refresh Profile
+          </button>
+        </div>
+      </div>
+
+      <div className="card-glow p-5 rounded-2xl">
+        <h3 className="text-theme font-bold text-lg">Notification Preferences</h3>
+        <p className="text-sm text-muted-theme mt-1">
+          Control dashboard notification behavior on this device.
+        </p>
+
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          <button
+            type="button"
+            onClick={() =>
+              onUiSettingsChange({
+                ...uiSettings,
+                dashboardNotificationSoundEnabled:
+                  !uiSettings.dashboardNotificationSoundEnabled,
+              })
+            }
+            className="rounded-xl p-3 text-left transition cursor-pointer"
+            style={{
+              background: 'var(--tg-bg-alt)',
+              border: '1px solid var(--tg-border)',
+            }}
+          >
+            <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+              Dashboard Notification Sound
+            </p>
+            <p
+              className="text-sm font-semibold"
+              style={{
+                color: uiSettings.dashboardNotificationSoundEnabled
+                  ? '#22c55e'
+                  : '#ef4444',
+              }}
+            >
+              {uiSettings.dashboardNotificationSoundEnabled
+                ? 'Enabled'
+                : 'Disabled'}
+            </p>
+          </button>
+
+          <button
+            type="button"
+            onClick={() =>
+              onUiSettingsChange({
+                ...uiSettings,
+                chatUnreadSoundEnabled: !uiSettings.chatUnreadSoundEnabled,
+              })
+            }
+            className="rounded-xl p-3 text-left transition cursor-pointer"
+            style={{
+              background: 'var(--tg-bg-alt)',
+              border: '1px solid var(--tg-border)',
+            }}
+          >
+            <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+              Unread Chat Sound
+            </p>
+            <p
+              className="text-sm font-semibold"
+              style={{
+                color: uiSettings.chatUnreadSoundEnabled ? '#22c55e' : '#ef4444',
+              }}
+            >
+              {uiSettings.chatUnreadSoundEnabled ? 'Enabled' : 'Disabled'}
+            </p>
+          </button>
+        </div>
+      </div>
+
+      <div className="card-glow p-5 rounded-2xl">
+        <h3 className="text-theme font-bold text-lg">Payout Setup Status</h3>
+        <p className="text-sm text-muted-theme mt-1">
+          Configure your operator PayMongo key so online downpayments go directly
+          to your account.
+        </p>
+
+        {effectiveLoading ? (
+          <p className="text-sm text-muted-theme mt-4">Loading status...</p>
+        ) : (
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div
+              className="rounded-xl p-3"
+              style={{
+                background: 'var(--tg-bg-alt)',
+                border: '1px solid var(--tg-border)',
+              }}
+            >
+              <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+                Application
+              </p>
+              <p className="text-sm font-semibold text-theme uppercase">
+                {status?.applicationStatus || 'unknown'}
+              </p>
+            </div>
+            <div
+              className="rounded-xl p-3"
+              style={{
+                background: 'var(--tg-bg-alt)',
+                border: '1px solid var(--tg-border)',
+              }}
+            >
+              <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+                Secret Key
+              </p>
+              <p className="text-sm font-semibold text-theme">
+                {status?.hasSecretKey
+                  ? `Configured (${status.maskedSecretKey || 'hidden'})`
+                  : 'Not configured'}
+              </p>
+            </div>
+            <div
+              className="rounded-xl p-3"
+              style={{
+                background: 'var(--tg-bg-alt)',
+                border: '1px solid var(--tg-border)',
+              }}
+            >
+              <p className="text-xs text-muted-theme uppercase tracking-wider mb-1">
+                Webhook Secret
+              </p>
+              <p className="text-sm font-semibold text-theme">
+                {!status?.webhookSecretSupported
+                  ? 'Column not ready'
+                  : status?.hasWebhookSecret
+                    ? 'Configured'
+                    : 'Optional'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {status?.setupRequired && (
+          <div
+            className="mt-4 rounded-xl p-3 text-sm"
+            style={{
+              background: 'rgba(245,158,11,0.12)',
+              border: '1px solid rgba(245,158,11,0.35)',
+              color: '#f59e0b',
+            }}
+          >
+            Setup required: please add your PayMongo Secret Key below before
+            handling online downpayments.
+          </div>
+        )}
+      </div>
+
+      <div className="card-glow p-5 rounded-2xl">
+        <h3 className="text-theme font-bold">PayMongo Account Configuration</h3>
+        <p className="text-xs text-muted-theme mt-1">
+          Secret key format usually starts with <span className="font-semibold">sk_</span>.
+          Webhook secret is optional and usually starts with{' '}
+          <span className="font-semibold">whsk_</span>.
+        </p>
+
+        <div className="mt-4 space-y-3">
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              PayMongo Secret Key
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                type={showSecret ? 'text' : 'password'}
+                value={secretKey}
+                onChange={(e) => setSecretKey(e.target.value)}
+                placeholder="sk_test_xxx or sk_live_xxx"
+                className="input-dark"
+                disabled={saving}
+              />
+              <button
+                type="button"
+                onClick={() => setShowSecret((prev) => !prev)}
+                className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  color: 'var(--primary)',
+                  border: '1px solid var(--tg-border-primary)',
+                }}
+              >
+                {showSecret ? 'Hide' : 'Show'}
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-1.5">
+              PayMongo Webhook Secret (Optional)
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                type={showWebhook ? 'text' : 'password'}
+                value={webhookSecret}
+                onChange={(e) => setWebhookSecret(e.target.value)}
+                placeholder="whsk_xxx"
+                className="input-dark"
+                disabled={saving}
+              />
+              <button
+                type="button"
+                onClick={() => setShowWebhook((prev) => !prev)}
+                className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer"
+                style={{
+                  background: 'var(--tg-subtle)',
+                  color: 'var(--primary)',
+                  border: '1px solid var(--tg-border-primary)',
+                }}
+              >
+                {showWebhook ? 'Hide' : 'Show'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {error && (
+          <p className="text-sm mt-3" style={{ color: '#ef4444' }}>
+            {error}
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="btn-primary text-sm px-4 py-2 disabled:opacity-60"
+          >
+            {saving ? 'Saving...' : 'Save Payout Setup'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadStatus(false)}
+            disabled={effectiveLoading || saving}
+            className="px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer disabled:opacity-60"
+            style={{
+              background: 'var(--tg-subtle)',
+              color: 'var(--primary)',
+              border: '1px solid var(--tg-border-primary)',
+            }}
+          >
+            Refresh Status
+          </button>
+        </div>
       </div>
     </div>
   );

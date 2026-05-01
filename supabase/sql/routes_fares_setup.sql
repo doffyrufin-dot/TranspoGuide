@@ -37,6 +37,7 @@ create table if not exists public.tbl_route_fares (
   distance_km numeric(8, 2),
   vehicle_type_id uuid references public.tbl_vehicle_types(id),
   vehicle_type text not null,
+  vehicle_image_url text,
   regular_fare numeric(10, 2) not null check (regular_fare > 0),
   discount_rate numeric(5, 4) not null default 0.20 check (discount_rate >= 0 and discount_rate <= 1),
   is_active boolean not null default true,
@@ -77,6 +78,9 @@ $$;
 
 alter table public.tbl_route_fares
   add column if not exists vehicle_type_id uuid;
+
+alter table public.tbl_route_fares
+  add column if not exists vehicle_image_url text;
 
 do $$
 begin

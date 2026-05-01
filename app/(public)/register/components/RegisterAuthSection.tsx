@@ -24,24 +24,28 @@ type RegisterAuthSectionProps = {
   authMethod: AuthMethod;
   emailForm: EmailFormState;
   showPassword: boolean;
+  showConfirmPassword: boolean;
   emailLoading: boolean;
   onSetAuthMethod: (method: AuthMethod) => void;
   onGoogleSignIn: () => void;
   onEmailSignUp: (e: React.FormEvent) => void;
   onEmailFieldChange: (field: keyof EmailFormState, value: string) => void;
   onTogglePasswordVisibility: () => void;
+  onToggleConfirmPasswordVisibility: () => void;
 };
 
 export default function RegisterAuthSection({
   authMethod,
   emailForm,
   showPassword,
+  showConfirmPassword,
   emailLoading,
   onSetAuthMethod,
   onGoogleSignIn,
   onEmailSignUp,
   onEmailFieldChange,
   onTogglePasswordVisibility,
+  onToggleConfirmPasswordVisibility,
 }: RegisterAuthSectionProps) {
   return (
     <main>
@@ -221,6 +225,9 @@ export default function RegisterAuthSection({
                     <input
                       type={showPassword ? 'text' : 'password'}
                       required
+                      minLength={8}
+                      pattern="(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{8,}"
+                      title="At least 8 characters, with uppercase, lowercase, number, and symbol."
                       value={emailForm.password}
                       onChange={(e) =>
                         onEmailFieldChange('password', e.target.value)
@@ -241,6 +248,10 @@ export default function RegisterAuthSection({
                       {showPassword ? <FaEyeSlash size={14} /> : <FaEye size={14} />}
                     </button>
                   </div>
+                  <p className="mt-2 text-[11px] text-muted-theme">
+                    Must include uppercase, lowercase, number, symbol, and at
+                    least 8 characters.
+                  </p>
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-muted-theme uppercase tracking-wider mb-2">
@@ -253,7 +264,7 @@ export default function RegisterAuthSection({
                       style={{ color: 'var(--tg-muted)' }}
                     />
                     <input
-                      type={showPassword ? 'text' : 'password'}
+                      type={showConfirmPassword ? 'text' : 'password'}
                       required
                       value={emailForm.confirmPassword}
                       onChange={(e) =>
@@ -261,8 +272,28 @@ export default function RegisterAuthSection({
                       }
                       placeholder="Re-enter your password"
                       className="input-dark w-full"
-                      style={{ paddingLeft: '2.25rem' }}
+                      style={{
+                        paddingLeft: '2.25rem',
+                        paddingRight: '2.5rem',
+                      }}
                     />
+                    <button
+                      type="button"
+                      onClick={onToggleConfirmPasswordVisibility}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 transition cursor-pointer"
+                      style={{ color: 'var(--tg-muted)' }}
+                      aria-label={
+                        showConfirmPassword
+                          ? 'Hide confirm password'
+                          : 'Show confirm password'
+                      }
+                    >
+                      {showConfirmPassword ? (
+                        <FaEyeSlash size={14} />
+                      ) : (
+                        <FaEye size={14} />
+                      )}
+                    </button>
                   </div>
                 </div>
 

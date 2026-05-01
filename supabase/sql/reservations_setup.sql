@@ -13,7 +13,7 @@ create table if not exists public.tbl_reservations (
   seat_count integer not null default 0,
   amount_due numeric(12,2) not null default 0,
   status text not null default 'pending_payment'
-    check (status in ('pending_payment', 'pending_operator_approval', 'paid', 'confirmed', 'rejected', 'cancelled')),
+    check (status in ('pending_payment', 'pending_operator_approval', 'paid', 'confirmed', 'rejected', 'cancelled', 'picked_up', 'departed')),
   payment_id text,
   guest_token text not null default encode(gen_random_bytes(24), 'hex'),
   trip_key text not null,
@@ -22,7 +22,8 @@ create table if not exists public.tbl_reservations (
   lock_expires_at timestamptz,
   paid_at timestamptz,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  operator_chat_seen_at timestamptz
 );
 
 create table if not exists public.tbl_seat_locks (

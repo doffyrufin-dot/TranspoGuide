@@ -1,6 +1,8 @@
 'use client';
 
 import React, { useEffect, useState, ElementType } from 'react';
+import dynamic from 'next/dynamic';
+import Image from 'next/image';
 import { supabase } from '@/utils/supabase/client';
 import type { AuthChangeEvent, Session } from '@supabase/supabase-js';
 import { useTheme } from '@/components/ThemeProvider';
@@ -23,13 +25,21 @@ import {
   ChevronsRight,
   X as CloseIcon,
 } from 'lucide-react';
-import OverviewTab from './tabs/OverviewTab';
-import VehicleManagementTab from './tabs/VehicleManagementTab';
-import RoutesFaresTab from './tabs/RoutesFaresTab';
-import BookingsTab from './tabs/BookingsTab';
-import DriversStaffTab from './tabs/DriversStaffTab';
-import ApplicationsTab from './tabs/ApplicationsTab';
-import ReportsTab from './tabs/ReportsTab';
+import type {
+  AdminApplicationsFilter,
+  AdminDashboardSettings,
+} from './tabs/SettingsTab';
+import playNotificationSound from '@/lib/utils/notification-sound';
+
+const OverviewTab = dynamic(() => import('./tabs/OverviewTab'));
+const VehicleManagementTab = dynamic(() => import('./tabs/VehicleManagementTab'));
+const RoutesFaresTab = dynamic(() => import('./tabs/RoutesFaresTab'));
+const BookingsTab = dynamic(() => import('./tabs/BookingsTab'));
+const DriversStaffTab = dynamic(() => import('./tabs/DriversStaffTab'));
+const ApplicationsTab = dynamic(() => import('./tabs/ApplicationsTab'));
+const ReportsTab = dynamic(() => import('./tabs/ReportsTab'));
+const ManageUsersTab = dynamic(() => import('./tabs/ManageUsersTab'));
+const SettingsTab = dynamic(() => import('./tabs/SettingsTab'));
 
 const isAbortLikeError = (error: unknown) => {
   if (!error || typeof error !== 'object') return false;
@@ -46,11 +56,22 @@ type DashboardNotification = {
   created_at: string;
 };
 
+const ADMIN_SETTINGS_STORAGE_KEY = 'tg_admin_settings_v1';
+
+const DEFAULT_ADMIN_SETTINGS: AdminDashboardSettings = {
+  notificationSoundEnabled: true,
+  autoOpenApplicationsOnNew: false,
+  defaultApplicationsFilter: 'Pending',
+};
+const ADMIN_NOTIFICATIONS_POLL_MS = 60000;
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible';
+
 export default function AdminDashboard() {
   const { theme, toggle: toggleTheme } = useTheme();
   const [activeTab, setActiveTab] = useState('Overview');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [authChecking, setAuthChecking] = useState(true);
   const [adminName, setAdminName] = useState('Admin');
   const [adminEmail, setAdminEmail] = useState('');
@@ -59,9 +80,17 @@ export default function AdminDashboard() {
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifUnreadCount, setNotifUnreadCount] = useState(0);
   const [notifications, setNotifications] = useState<DashboardNotification[]>([]);
-  const [applicationsFilter, setApplicationsFilter] = useState<
-    'All' | 'Pending' | 'Approved' | 'Rejected'
-  >('All');
+  const notifSoundReadyRef = React.useRef(false);
+  const notifTopIdRef = React.useRef('');
+  const notifOpenRef = React.useRef(false);
+  const adminSettingsRef = React.useRef(DEFAULT_ADMIN_SETTINGS);
+  const [adminSettings, setAdminSettings] = useState<AdminDashboardSettings>(
+    DEFAULT_ADMIN_SETTINGS
+  );
+  const [applicationsFilter, setApplicationsFilter] =
+    useState<AdminApplicationsFilter>(
+      DEFAULT_ADMIN_SETTINGS.defaultApplicationsFilter
+    );
   const [applicationsFilterNonce, setApplicationsFilterNonce] = useState(0);
 
   useEffect(() => {
@@ -159,6 +188,47 @@ export default function AdminDashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.localStorage.getItem(ADMIN_SETTINGS_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<AdminDashboardSettings>;
+      const nextSettings: AdminDashboardSettings = {
+        notificationSoundEnabled:
+          parsed.notificationSoundEnabled ??
+          DEFAULT_ADMIN_SETTINGS.notificationSoundEnabled,
+        autoOpenApplicationsOnNew:
+          parsed.autoOpenApplicationsOnNew ??
+          DEFAULT_ADMIN_SETTINGS.autoOpenApplicationsOnNew,
+        defaultApplicationsFilter:
+          parsed.defaultApplicationsFilter === 'All' ||
+          parsed.defaultApplicationsFilter === 'Pending' ||
+          parsed.defaultApplicationsFilter === 'Approved' ||
+          parsed.defaultApplicationsFilter === 'Rejected'
+            ? parsed.defaultApplicationsFilter
+            : DEFAULT_ADMIN_SETTINGS.defaultApplicationsFilter,
+      };
+      setAdminSettings(nextSettings);
+      setApplicationsFilter(nextSettings.defaultApplicationsFilter);
+    } catch {
+      // ignore malformed local settings payload
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(
+      ADMIN_SETTINGS_STORAGE_KEY,
+      JSON.stringify(adminSettings)
+    );
+    adminSettingsRef.current = adminSettings;
+  }, [adminSettings]);
+
+  useEffect(() => {
+    notifOpenRef.current = notifOpen;
+  }, [notifOpen]);
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     window.location.replace('/login');
@@ -166,24 +236,53 @@ export default function AdminDashboard() {
 
   const handleNavClick = (tab: string) => {
     setActiveTab(tab);
+    if (tab === 'Applications') {
+      setApplicationsFilter(adminSettings.defaultApplicationsFilter);
+      setApplicationsFilterNonce((prev) => prev + 1);
+    }
     setIsSidebarOpen(false);
   };
 
-  const loadNotifications = async (silent = false) => {
+  const loadNotifications = async () => {
     if (!sessionToken) return;
     try {
       const res = await fetch('/api/admin/notifications', {
         headers: {
           Authorization: `Bearer ${sessionToken}`,
         },
-        cache: 'no-store',
       });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error || 'Failed to load notifications.');
       }
-      setNotifications((data.notifications || []) as DashboardNotification[]);
-      if (!notifOpen) {
+      const nextNotifications = (data.notifications || []) as DashboardNotification[];
+      const nextTopId = String(nextNotifications[0]?.id || '').trim();
+      const hasNewTopNotification =
+        notifSoundReadyRef.current &&
+        nextTopId &&
+        nextTopId !== notifTopIdRef.current;
+      const currentSettings = adminSettingsRef.current;
+      if (
+        hasNewTopNotification &&
+        currentSettings.notificationSoundEnabled
+      ) {
+        playNotificationSound();
+      }
+      if (
+        hasNewTopNotification &&
+        currentSettings.autoOpenApplicationsOnNew &&
+        nextTopId.startsWith('app-')
+      ) {
+        setActiveTab('Applications');
+        setApplicationsFilter(currentSettings.defaultApplicationsFilter);
+        setApplicationsFilterNonce((prev) => prev + 1);
+      }
+      if (!notifSoundReadyRef.current) {
+        notifSoundReadyRef.current = true;
+      }
+      notifTopIdRef.current = nextTopId;
+      setNotifications(nextNotifications);
+      if (!notifOpenRef.current) {
         setNotifUnreadCount(Number(data.unreadCount || 0));
       }
     } catch {
@@ -193,13 +292,14 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     if (!sessionToken) return;
-    void loadNotifications(false);
+    void loadNotifications();
     const timer = window.setInterval(() => {
-      void loadNotifications(true);
-    }, 30000);
+      if (!isDocumentVisible()) return;
+      void loadNotifications();
+    }, ADMIN_NOTIFICATIONS_POLL_MS);
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionToken, notifOpen]);
+  }, [sessionToken]);
 
   const formatNotifTime = (value: string) => {
     const date = new Date(value);
@@ -219,6 +319,8 @@ export default function AdminDashboard() {
         return <BookingsTab accessToken={sessionToken} />;
       case 'Drivers':
         return <DriversStaffTab accessToken={sessionToken} />;
+      case 'Users':
+        return <ManageUsersTab accessToken={sessionToken} />;
       case 'Reports':
         return <ReportsTab accessToken={sessionToken} />;
       case 'Applications':
@@ -226,6 +328,17 @@ export default function AdminDashboard() {
           <ApplicationsTab
             initialFilter={applicationsFilter}
             filterNonce={applicationsFilterNonce}
+          />
+        );
+      case 'Settings':
+        return (
+          <SettingsTab
+            accessToken={sessionToken}
+            settings={adminSettings}
+            onSettingsChange={(nextSettings) => {
+              setAdminSettings(nextSettings);
+              setApplicationsFilter(nextSettings.defaultApplicationsFilter);
+            }}
           />
         );
       default:
@@ -344,6 +457,7 @@ export default function AdminDashboard() {
             { icon: LayoutDashboard, label: 'Overview', tab: 'Overview' },
             { icon: Bus, label: 'Manage Vehicles', tab: 'Vans' },
             { icon: Calendar, label: 'Bookings', tab: 'Bookings' },
+            { icon: Users, label: 'Manage Users', tab: 'Users' },
             { icon: Users, label: 'Drivers', tab: 'Drivers' },
             { icon: MapIcon, label: 'Routes & Fares', tab: 'Routes' },
             { icon: ClipboardList, label: 'Applications', tab: 'Applications' },
@@ -511,7 +625,9 @@ export default function AdminDashboard() {
                             key={item.id}
                             onClick={() => {
                               setActiveTab('Applications');
-                              setApplicationsFilter('Pending');
+                              setApplicationsFilter(
+                                adminSettings.defaultApplicationsFilter
+                              );
                               setApplicationsFilterNonce((prev) => prev + 1);
                               setNotifOpen(false);
                               setIsSidebarOpen(false);
@@ -532,13 +648,13 @@ export default function AdminDashboard() {
                 </>
               )}
             </div>
-            <img
+            <Image
               src={adminAvatarUrl?.trim() || '/images/profile.png'}
               alt="Admin avatar"
+              width={32}
+              height={32}
               className="w-8 h-8 rounded-xl object-cover"
-              onError={(e) => {
-                e.currentTarget.src = '/images/profile.png';
-              }}
+              sizes="32px"
             />
           </div>
         </header>

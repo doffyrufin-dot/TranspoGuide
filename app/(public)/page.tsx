@@ -1,4 +1,6 @@
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
+import Image from 'next/image';
 import { redirect } from 'next/navigation';
 import AuthHashToast from '@/app/(public)/components/AuthHashToast';
 import {
@@ -14,6 +16,20 @@ import {
   FaArrowRight,
 } from 'react-icons/fa';
 import { FadeIn, Stagger, StaggerItem } from '@/components/ui/motion';
+import { listTrustedOperatorRatings } from '@/lib/db/operator-feedback';
+
+const TrustedOperatorsGrid = dynamic(
+  () => import('@/app/(public)/components/TrustedOperatorsGrid'),
+  {
+    loading: () => (
+      <div className="card-glow rounded-2xl p-6 text-center text-sm text-muted-theme">
+        Loading operator ratings...
+      </div>
+    ),
+  }
+);
+
+export const revalidate = 120;
 
 const FEATURES = [
   {
@@ -63,7 +79,7 @@ const STEPS = [
 const STATS = [
   { icon: <FaRoute />, label: 'ROUTES', value: '50+' },
   { icon: <FaShuttleVan />, label: 'VEHICLES', value: '4' },
-  { icon: <FaClock />, label: 'AVG SEARCH TIME', value: '<5s' },
+  { icon: <FaClock />, label: 'AVG SEARCH TIME', value: 'Less than 5s' },
   { icon: <FaChair />, label: 'RESERVATIONS', value: '1.2K+' },
 ];
 
@@ -74,6 +90,12 @@ type HomePageProps = {
 const HomePage = async ({ searchParams }: HomePageProps) => {
   const params = await searchParams;
   const code = params.code;
+  const trustedParam = Array.isArray(params.trusted)
+    ? params.trusted[0]
+    : params.trusted;
+  const trustedOnly = ['1', 'true', 'yes', 'trusted'].includes(
+    String(trustedParam || '').toLowerCase()
+  );
 
   // Prevent visible landing-page flash after OAuth by redirecting on the server.
   if (typeof code === 'string' && code) {
@@ -88,6 +110,11 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
     nextParams.set('flow', 'login');
     redirect(`/auth/callback?${nextParams.toString()}`);
   }
+
+  const trustedOperators = await listTrustedOperatorRatings(4, {
+    trustedOnly,
+  }).catch(() => []);
+  const showTrustedOperatorSection = trustedOperators.length > 0 || trustedOnly;
 
   return (
     <main className="overflow-x-hidden">
@@ -150,6 +177,7 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
                 className="relative w-full aspect-video rounded-xl overflow-hidden"
                 style={{ background: 'var(--tg-bg-alt)' }}
               >
+<<<<<<< HEAD
                 <video
                   className="absolute inset-0 w-full h-full object-cover rounded-xl"
                   src="/videos/vids.mp4"
@@ -157,13 +185,25 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
                   loop
                   muted
                   playsInline
+=======
+                <Image
+                  src="/images/bgterminal.jpg"
+                  alt="Isabel Integrated Bus Terminal"
+                  fill
+                  sizes="(max-width: 1024px) 100vw, 50vw"
+                  className="absolute inset-0 w-full h-full object-cover rounded-xl"
+>>>>>>> 8a818bca7aea478f34a0909c19490afcff2cf34c
                 />
                 <div className="absolute inset-0 rounded-xl backdrop-blur-[2px] bg-black/40" />
               </div>
               <div className="mt-4 flex items-center justify-between px-2 pb-2">
                 <div>
                   <p className="text-theme font-semibold text-sm">
+<<<<<<< HEAD
                     Isabel Teminal View
+=======
+                    Isabel Integrated Bus Terminal
+>>>>>>> 8a818bca7aea478f34a0909c19490afcff2cf34c
                   </p>
                   <p className="text-muted-theme text-xs mt-0.5">
                     Find your fastest ride today
@@ -196,13 +236,75 @@ const HomePage = async ({ searchParams }: HomePageProps) => {
                     <span className="text-[var(--primary)]">{s.icon}</span>
                     {s.label}
                   </div>
-                  <span className="stat-number text-3xl">{s.value}</span>
+                  <span className="text-[var(--primary)] font-extrabold text-xl md:text-2xl leading-tight">
+                    {s.value}
+                  </span>
                 </div>
               ))}
             </div>
           </FadeIn>
         </div>
       </section>
+
+      {showTrustedOperatorSection && (
+        <section id="trusted-operators" className="py-20 px-6">
+          <div className="max-w-7xl mx-auto">
+            <FadeIn className="text-center mb-12">
+              <h2 className="text-3xl md:text-4xl font-extrabold text-theme">
+                Trusted{' '}
+                <span className="text-gradient" style={{ fontStyle: 'italic' }}>
+                  Van Operators
+                </span>
+              </h2>
+              <p className="mt-3 text-muted-theme max-w-xl mx-auto">
+                Ratings and feedback from commuters after confirmed downpayment.
+              </p>
+              <div className="mt-4 inline-flex items-center gap-2 p-1 rounded-xl border border-[var(--tg-border)] bg-[var(--tg-bg-alt)]">
+                <Link
+                  href="/#trusted-operators"
+                  scroll={false}
+                  replace
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg transition"
+                  style={
+                    !trustedOnly
+                      ? { background: 'var(--primary)', color: '#fff' }
+                      : { color: 'var(--tg-muted)' }
+                  }
+                >
+                  All Rated
+                </Link>
+                <Link
+                  href="/?trusted=1#trusted-operators"
+                  scroll={false}
+                  replace
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg transition"
+                  style={
+                    trustedOnly
+                      ? { background: 'var(--primary)', color: '#fff' }
+                      : { color: 'var(--tg-muted)' }
+                  }
+                >
+                  Trusted Only
+                </Link>
+              </div>
+            </FadeIn>
+
+            {trustedOperators.length === 0 ? (
+              <div className="card-glow rounded-2xl p-6 text-center">
+                <p className="text-theme font-semibold">
+                  No trusted operators yet
+                </p>
+                <p className="text-sm text-muted-theme mt-1">
+                  Trusted status needs at least 3 reviews and 4.2+ average
+                  rating.
+                </p>
+              </div>
+            ) : (
+              <TrustedOperatorsGrid operators={trustedOperators} />
+            )}
+          </div>
+        </section>
+      )}
 
       {/* ── FEATURES (4 Ways / Why Choose) ──────────── */}
       <section className="py-24 px-6">

@@ -1,11 +1,10 @@
-'use client';
+﻿'use client';
 
 import React, { useEffect, useState, useMemo, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import 'leaflet/dist/leaflet.css';
 import {
   createReservationIntent,
-  createCheckoutSession,
   fetchTripSeatStatuses,
 } from '@/lib/services/payment.services';
 import {
@@ -28,7 +27,7 @@ import {
   FaCheckCircle,
 } from 'react-icons/fa';
 
-/* ── Lazy-load Leaflet (SSR-safe) ────────────────────── */
+/* â”€â”€ Lazy-load Leaflet (SSR-safe) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 const MapContainer: any = dynamic(
   () => import('react-leaflet').then((m) => m.MapContainer as any),
   { ssr: false }
@@ -42,13 +41,14 @@ const Marker: any = dynamic(
   { ssr: false }
 );
 
-/* Stadia Maps tile URL (Alidade Smooth — modern, clean design) */
-const STADIA_TILE_URL =
-  'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png?api_key=009859a0-03ac-47da-835c-e5886a772e96';
+/* Stadia Maps tile URL (Alidade Smooth Dark) */
 const STADIA_DARK_URL =
   'https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png?api_key=009859a0-03ac-47da-835c-e5886a772e96';
+const SEAT_STATUS_POLL_MS = 15000;
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible';
 
-/* ── Types ─────────────────────────────────────────────── */
+/* â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 type SeatStatus = 'available' | 'occupied' | 'reserved';
 
 interface Seat {
@@ -57,19 +57,19 @@ interface Seat {
   status: SeatStatus;
 }
 
-/* ── Mock data ─────────────────────────────────────────── */
+/* â”€â”€ Mock data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 const VAN_INFO = {
   plate: 'ABC-1234',
   driver: 'Juan Dela Cruz',
   capacity: 14,
   departure: '10:30 AM',
-  route: 'Isabel → Ormoc City',
+  route: 'Isabel -> Ormoc City',
   fare: 150,
   downPayment: 50,
 };
 
 const INITIAL_SEATS: Seat[] = [
-  // Row 0 — front (driver + 2 passengers)
+  // Row 0 - front (driver + 2 passengers)
   { id: 0, label: 'D', status: 'occupied' }, // driver
   { id: 1, label: '1', status: 'available' },
   { id: 2, label: '2', status: 'available' },
@@ -85,7 +85,7 @@ const INITIAL_SEATS: Seat[] = [
   { id: 9, label: '9', status: 'available' },
   { id: 10, label: '10', status: 'available' },
   { id: 11, label: '11', status: 'available' },
-  // Row 4 — back
+  // Row 4 - back
   { id: 12, label: '12', status: 'available' },
   { id: 13, label: '13', status: 'available' },
   { id: 14, label: '14', status: 'available' },
@@ -136,7 +136,16 @@ const isValidPhMobile = (value: string) => /^\+639\d{9}$/.test(value.trim());
 const isValidEmail = (value: string) =>
   /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 
-/* ── Map click handler (loaded only client-side) ───────── */
+const formatPickupWithCoords = (label: string, lat: number, lng: number) => {
+  const coordsText = `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  const strippedLabel = String(label || '')
+    .replace(/\(\s*-?\d{1,2}(?:\.\d+)?\s*,\s*-?\d{1,3}(?:\.\d+)?\s*\)\s*$/i, '')
+    .trim();
+  if (!strippedLabel) return coordsText;
+  return `${strippedLabel} (${coordsText})`;
+};
+
+/* â”€â”€ Map click handler (loaded only client-side) â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 function LocationPicker({
   onPick,
 }: {
@@ -151,7 +160,7 @@ function LocationPicker({
   return null;
 }
 
-/* ── Re-center map when coords change ──────────────────── */
+/* â”€â”€ Re-center map when coords change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */
 function MapUpdater({ coords }: { coords: [number, number] | null }) {
   const { useMap } = require('react-leaflet');
   const map = useMap();
@@ -161,9 +170,9 @@ function MapUpdater({ coords }: { coords: [number, number] | null }) {
   return null;
 }
 
-/* ══════════════════════════════════════════════════════════
+/* â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
    RESERVATION PAGE
-══════════════════════════════════════════════════════════ */
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
 const ReservationPage = () => {
   const [seats, setSeats] = useState<Seat[]>(INITIAL_SEATS);
   const [selectedSeatIds, setSelectedSeatIds] = useState<number[]>([]);
@@ -173,10 +182,11 @@ const ReservationPage = () => {
   const [pickupLocation, setPickupLocation] = useState('');
   const [showMap, setShowMap] = useState(false);
   const [mapCoords, setMapCoords] = useState<[number, number] | null>(null);
+  const [pickupConfirmedCoords, setPickupConfirmedCoords] = useState<
+    [number, number] | null
+  >(null);
   const [isPaying, setIsPaying] = useState(false);
   const [payError, setPayError] = useState('');
-  const [showPaymentNotice, setShowPaymentNotice] = useState(false);
-  const [paymentNoticeAccepted, setPaymentNoticeAccepted] = useState(false);
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [loadingQueue, setLoadingQueue] = useState(true);
   const [selectedQueueId, setSelectedQueueId] = useState<string | null>(null);
@@ -241,7 +251,8 @@ const ReservationPage = () => {
   const handleMapPick = async (lat: number, lng: number) => {
     fromMapClick.current = true;
     setMapCoords([lat, lng]);
-    setPickupLocation(`${lat.toFixed(5)}, ${lng.toFixed(5)}`); // show coords immediately
+    setPickupConfirmedCoords([lat, lng]);
+    setPickupLocation(formatPickupWithCoords('', lat, lng));
 
     // Reverse-geocode to get readable address
     try {
@@ -251,7 +262,7 @@ const ReservationPage = () => {
       const data = await res.json();
       if (data.display_name) {
         fromMapClick.current = true;
-        setPickupLocation(data.display_name);
+        setPickupLocation(formatPickupWithCoords(data.display_name, lat, lng));
       }
     } catch {
       /* keep the coordinates if geocoding fails */
@@ -342,10 +353,13 @@ const ReservationPage = () => {
     };
 
     loadSeatStatuses();
-    const timer = setInterval(loadSeatStatuses, 10000);
+    const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
+      void loadSeatStatuses();
+    }, SEAT_STATUS_POLL_MS);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      window.clearInterval(timer);
     };
   }, [hasActiveVan, tripKey, selectedQueue?.id]);
 
@@ -354,22 +368,27 @@ const ReservationPage = () => {
     isValidEmail(passengerEmail) &&
     isValidPhMobile(contactNumber) &&
     pickupLocation.trim() &&
+    !!pickupConfirmedCoords &&
     selectedSeats.length > 0 &&
     hasActiveVan;
 
-  const proceedToPayment = async () => {
+  const submitReservation = async () => {
     if (!isFormValid || isPaying) return;
+    if (!pickupConfirmedCoords) {
+      setPayError('Please pin and confirm your exact pickup point on the map.');
+      return;
+    }
     setIsPaying(true);
     setPayError('');
 
     try {
-      const seatLabels = selectedSeats.map((s) => s.label).join(', ');
-
       const intent = await createReservationIntent({
         fullName,
         passengerEmail: passengerEmail.trim().toLowerCase(),
         contactNumber,
         pickupLocation,
+        pickupLat: pickupConfirmedCoords[0],
+        pickupLng: pickupConfirmedCoords[1],
         route: activeRoute,
         seatLabels: selectedSeats.map((s) => s.label),
         amount: totalDown,
@@ -378,31 +397,16 @@ const ReservationPage = () => {
         operatorUserId: selectedQueue?.operatorUserId,
       });
 
-      const checkoutUrl = await createCheckoutSession({
-        amount: totalDown,
-        seatLabels,
-        fullName,
-        passengerEmail: passengerEmail.trim().toLowerCase(),
-        contactNumber,
-        route: activeRoute,
-        reservationId: intent.reservation_id,
-        operatorUserId: selectedQueue?.operatorUserId,
-        queueId: selectedQueue?.id,
-      });
-
-      // Redirect to PayMongo checkout
-      window.location.href = checkoutUrl;
+      window.location.href = `/reservation/status?reservation_id=${encodeURIComponent(
+        intent.reservation_id
+      )}&reservation_token=${encodeURIComponent(
+        intent.guest_token
+      )}&reserved=success`;
     } catch (error: any) {
       setPayError(error?.message || 'Network error. Please try again.');
     } finally {
       setIsPaying(false);
     }
-  };
-
-  const handlePayment = () => {
-    if (!isFormValid || isPaying) return;
-    setPaymentNoticeAccepted(false);
-    setShowPaymentNotice(true);
   };
 
   return (
@@ -411,7 +415,7 @@ const ReservationPage = () => {
       <section className="relative pt-36 pb-16 px-6">
         <div
           className="max-w-3xl mx-auto text-center"
-          data-aos="fade-up"
+         
           suppressHydrationWarning
         >
           <div className="section-badge mx-auto mb-5">Seat Reservation</div>
@@ -422,8 +426,8 @@ const ReservationPage = () => {
             </span>
           </h1>
           <p className="mt-4 text-muted-theme text-lg max-w-xl mx-auto">
-            Pick your preferred seat, fill in your details, and secure your ride
-            with a quick down payment.
+            Pick your preferred seat and submit your request. Downpayment is only
+            required after operator confirmation.
           </p>
         </div>
       </section>
@@ -431,10 +435,10 @@ const ReservationPage = () => {
       {/* Main content */}
       <section className="pb-28 px-6">
         <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8">
-          {/* ── LEFT COLUMN: Van Info + Seat Map ─────── */}
+          {/* â”€â”€ LEFT COLUMN: Van Info + Seat Map â”€â”€â”€â”€â”€â”€â”€ */}
           <div
             className="lg:col-span-5 flex flex-col gap-6"
-            data-aos="fade-right"
+           
             suppressHydrationWarning
           >
             {/* Van info card */}
@@ -531,7 +535,7 @@ const ReservationPage = () => {
               >
                 {/* Front label */}
                 <div className="text-center text-xs font-bold text-muted-theme uppercase tracking-widest mb-3">
-                  ▲ Front
+                  Front
                 </div>
 
                 <div className="flex flex-col items-center gap-2">
@@ -577,7 +581,7 @@ const ReservationPage = () => {
                 </div>
 
                 <div className="text-center text-xs font-bold text-muted-theme uppercase tracking-widest mt-3">
-                  ▼ Back
+                  Back
                 </div>
               </div>
 
@@ -687,10 +691,10 @@ const ReservationPage = () => {
             </div>
           </div>
 
-          {/* ── RIGHT COLUMN: Form + Payment ─────────── */}
+          {/* â”€â”€ RIGHT COLUMN: Form + Payment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
           <div
             className="lg:col-span-7 flex flex-col gap-6"
-            data-aos="fade-left"
+           
             suppressHydrationWarning
           >
             {/* Commuter details form */}
@@ -730,7 +734,7 @@ const ReservationPage = () => {
                     </div>
                   ) : (
                     <p className="text-muted-theme text-sm">
-                      No seat selected — tap seats on the map
+                      No seat selected - tap seats on the map
                     </p>
                   )}
                 </div>
@@ -811,7 +815,10 @@ const ReservationPage = () => {
                     <input
                       type="text"
                       value={pickupLocation}
-                      onChange={(e) => setPickupLocation(e.target.value)}
+                      onChange={(e) => {
+                        setPickupLocation(e.target.value);
+                        setPickupConfirmedCoords(null);
+                      }}
                       placeholder="Enter address or pin on map"
                       className="input-dark flex-1"
                     />
@@ -823,13 +830,18 @@ const ReservationPage = () => {
                       <FaMapPin size={13} /> {showMap ? 'Hide' : 'Pin'}
                     </button>
                   </div>
+                  <p className="mt-2 text-[11px] text-muted-theme">
+                    {pickupConfirmedCoords
+                      ? `Pickup pinned: ${pickupConfirmedCoords[0].toFixed(6)}, ${pickupConfirmedCoords[1].toFixed(6)}`
+                      : 'Type an address, then tap the map to confirm exact pickup point.'}
+                  </p>
                 </div>
 
-                {/* Map — Leaflet + Stadia tiles (toggleable) */}
+                {/* Map â€” Leaflet + Stadia tiles (toggleable) */}
                 {showMap && (
                   <div
                     className="rounded-2xl overflow-hidden"
-                    data-aos="fade-up"
+                   
                     suppressHydrationWarning
                   >
                     <MapContainer
@@ -847,21 +859,21 @@ const ReservationPage = () => {
                       {mapCoords && <Marker position={mapCoords} />}
                     </MapContainer>
                     <p className="text-center text-xs text-muted-theme mt-2">
-                      Tap on the map to pin your pickup location
+                      Tap on the map to pin and confirm your exact pickup location
                     </p>
                   </div>
                 )}
               </form>
             </div>
 
-            {/* Payment summary */}
+            {/* Reservation summary */}
             <div className="card-glow p-6 md:p-8 rounded-2xl">
               <h2 className="text-theme font-bold text-xl mb-1 flex items-center gap-2">
-                <FaMoneyBillWave style={{ color: 'var(--primary)' }} /> Payment
+                <FaMoneyBillWave style={{ color: 'var(--primary)' }} /> Reservation
                 Summary
               </h2>
               <p className="text-muted-theme text-sm mb-5">
-                Review your booking before paying
+                Review your booking before submitting your request
               </p>
 
               <div className="mb-6">
@@ -874,38 +886,38 @@ const ReservationPage = () => {
                   <span className="value">
                     {selectedSeats.length > 0
                       ? selectedSeats.map((s) => s.label).join(', ')
-                      : '—'}
+                      : '-'}
                   </span>
                 </div>
                 <div className="summary-row">
                   <span className="label">No. of Seats</span>
-                  <span className="value">{selectedSeats.length || '—'}</span>
+                  <span className="value">{selectedSeats.length || '-'}</span>
                 </div>
                 <div className="summary-row">
                   <span className="label">Passenger</span>
-                  <span className="value">{fullName || '—'}</span>
+                  <span className="value">{fullName || '-'}</span>
                 </div>
                 <div className="summary-row">
                   <span className="label">Contact</span>
-                  <span className="value">{contactNumber || '—'}</span>
+                  <span className="value">{contactNumber || '-'}</span>
                 </div>
                 <div className="summary-row">
                   <span className="label">Email</span>
-                  <span className="value">{passengerEmail || '—'}</span>
+                  <span className="value">{passengerEmail || '-'}</span>
                 </div>
                 <div className="summary-row">
                   <span className="label">Pickup</span>
                   <span className="value text-right max-w-[200px] truncate">
-                    {pickupLocation || '—'}
+                    {pickupLocation || '-'}
                   </span>
                 </div>
                 <div className="summary-row">
                   <span className="label">Fare per Seat</span>
-                  <span className="value">₱{VAN_INFO.fare.toFixed(2)}</span>
+                  <span className="value">PHP {VAN_INFO.fare.toFixed(2)}</span>
                 </div>
                 <div className="summary-row">
                   <span className="label">Total Fare</span>
-                  <span className="value">₱{totalFare.toFixed(2)}</span>
+                  <span className="value">PHP {totalFare.toFixed(2)}</span>
                 </div>
                 <div className="summary-row">
                   <span className="label text-theme font-semibold">
@@ -915,13 +927,13 @@ const ReservationPage = () => {
                     className="value text-xl"
                     style={{ color: 'var(--primary)' }}
                   >
-                    ₱{totalDown.toFixed(2)}
+                    PHP {totalDown.toFixed(2)}
                   </span>
                 </div>
               </div>
 
               <button
-                onClick={handlePayment}
+                onClick={() => void submitReservation()}
                 disabled={!isFormValid || isPaying}
                 className="btn-primary  w-full text-base group"
                 style={
@@ -951,12 +963,11 @@ const ReservationPage = () => {
                         d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
                       />
                     </svg>
-                    Processing…
+                    Processing...
                   </>
                 ) : (
                   <>
-                    <FaMoneyBillWave /> Pay Down Payment — ₱
-                    {totalDown.toFixed(2)}
+                    <FaMoneyBillWave /> Submit Reservation Request
                     <FaArrowRight
                       size={14}
                       className="ml-auto group-hover:translate-x-1 transition-transform"
@@ -976,75 +987,15 @@ const ReservationPage = () => {
 
               <p className="mt-3 text-center text-xs text-muted-theme flex items-center justify-center gap-1.5">
                 <FaCheckCircle style={{ color: 'var(--primary)' }} size={11} />
-                You will be redirected to PayMongo to complete your payment
+                Downpayment will be requested once the operator confirms your request
               </p>
             </div>
           </div>
         </div>
       </section>
-
-      {showPaymentNotice && (
-        <div
-          className="fixed inset-0 z-[120] flex items-center justify-center p-4"
-          style={{ background: 'rgba(2, 6, 23, 0.65)' }}
-          onClick={() => setShowPaymentNotice(false)}
-        >
-          <div
-            className="w-full max-w-lg card-glow rounded-2xl p-6"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-xl font-bold text-theme mb-2">Payment Terms</h3>
-            <p className="text-sm text-muted-theme leading-relaxed">
-              Please review before proceeding. The down payment is used to secure
-              your selected seat and queue slot.
-            </p>
-            <ul className="mt-4 space-y-2 text-sm text-theme">
-              <li>- Down payment is non-refundable once payment is completed.</li>
-              <li>- Reservation is subject to operator verification and route availability.</li>
-              <li>- Fake or duplicate reservations may be cancelled by the operator/admin.</li>
-            </ul>
-
-            <label className="mt-5 flex items-start gap-2 text-sm text-theme cursor-pointer">
-              <input
-                type="checkbox"
-                checked={paymentNoticeAccepted}
-                onChange={(e) => setPaymentNoticeAccepted(e.target.checked)}
-                className="mt-0.5"
-              />
-              <span>I agree to the payment terms and non-refundable policy.</span>
-            </label>
-
-            <div className="mt-6 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowPaymentNotice(false)}
-                className="btn-outline px-4 py-2 text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (!paymentNoticeAccepted || isPaying) return;
-                  setShowPaymentNotice(false);
-                  void proceedToPayment();
-                }}
-                disabled={!paymentNoticeAccepted || isPaying}
-                className="btn-primary px-4 py-2 text-sm"
-                style={
-                  !paymentNoticeAccepted || isPaying
-                    ? { opacity: 0.5, cursor: 'not-allowed' }
-                    : {}
-                }
-              >
-                Agree and Proceed
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </main>
   );
 };
 
 export default ReservationPage;
+

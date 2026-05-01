@@ -17,6 +17,9 @@ export interface CreateReservationIntentInput {
 const createGuestToken = () => randomBytes(24).toString('hex');
 
 const LOCK_MINUTES = Number(process.env.SEAT_LOCK_MINUTES || '5');
+const PAYMENT_LOCK_MINUTES = Number(
+  process.env.RESERVATION_PAYMENT_WINDOW_MINUTES || '15'
+);
 const AUTO_PAYMENT_PREFIX = 'Payment completed. Payment Reference: ';
 const AUTO_DEPARTED_MESSAGE =
   'Van update: This trip has departed from the terminal.';
@@ -55,6 +58,9 @@ const getServiceClient = () => {
 
 const lockExpiresAtIso = () =>
   new Date(Date.now() + LOCK_MINUTES * 60 * 1000).toISOString();
+
+const paymentLockExpiresAtIso = () =>
+  new Date(Date.now() + PAYMENT_LOCK_MINUTES * 60 * 1000).toISOString();
 
 const isSeatLockActive = (
   row: { status?: string | null; expires_at?: string | null },
@@ -212,7 +218,7 @@ export async function createReservationIntent(input: CreateReservationIntentInpu
       route: input.route,
       seat_count: seatLabels.length,
       amount_due: input.amount,
-      status: 'pending_payment',
+      status: 'pending_operator_approval',
       trip_key: input.tripKey,
       lock_expires_at: lockExpiresAtIso(),
       queue_id: input.queueId || null,
@@ -415,12 +421,13 @@ export async function addReservationMessage(input: {
 export async function markReservationPaid(reservationId: string, paymentId?: string) {
   const supabase = getServiceClient();
   const nowIso = new Date().toISOString();
+  const nowMs = new Date(nowIso).getTime();
   const isExactPaymentId = (value?: string | null) =>
     typeof value === 'string' && value.trim().startsWith('pay_');
 
   const { data: reservationRows, error: reservationReadError } = await supabase
     .from('tbl_reservations')
-    .select('id, full_name, payment_id')
+    .select('id, full_name, payment_id, status, lock_expires_at')
     .eq('id', reservationId)
     .limit(1);
 
@@ -432,10 +439,49 @@ export async function markReservationPaid(reservationId: string, paymentId?: str
   if (!reservation) {
     throw new Error('Reservation not found.');
   }
+  const currentStatus = String((reservation as { status?: string | null }).status || '').toLowerCase();
+  if (currentStatus === 'pending_operator_approval') {
+    throw new Error('Reservation is still waiting for operator approval.');
+  }
+  if (
+    currentStatus !== 'pending_payment' &&
+    currentStatus !== 'confirmed' &&
+    currentStatus !== 'paid'
+  ) {
+    throw new Error('Reservation status does not allow payment confirmation.');
+  }
 
   const canonicalReservationId =
     String((reservation as { id?: string | null }).id || reservationId).trim() ||
     reservationId;
+
+  if (currentStatus === 'pending_payment') {
+    const { data: lockRows, error: lockReadError } = await supabase
+      .from('tbl_seat_locks')
+      .select('id, status, expires_at')
+      .eq('reservation_id', reservationId)
+      .in('status', ['locked', 'reserved']);
+
+    if (lockReadError) {
+      throw new Error(lockReadError.message || 'Failed to validate seat lock.');
+    }
+
+    const hasActiveLock = (lockRows || []).some((row: any) => {
+      const status = String(row?.status || '').toLowerCase();
+      if (status === 'reserved') return true;
+      if (status !== 'locked') return false;
+      const expiresAt = String(row?.expires_at || '').trim();
+      const expiresAtMs = expiresAt ? new Date(expiresAt).getTime() : 0;
+      return expiresAtMs > nowMs;
+    });
+
+    if (!hasActiveLock) {
+      await releaseReservationLocks(canonicalReservationId);
+      throw new Error(
+        'Payment window expired for this reservation. Please reserve your seat again.'
+      );
+    }
+  }
 
   const incomingPaymentReference = (paymentId || '').trim();
   const currentPaymentReference = (reservation.payment_id || '').trim();
@@ -449,9 +495,10 @@ export async function markReservationPaid(reservationId: string, paymentId?: str
   const { error: reservationError } = await supabase
     .from('tbl_reservations')
     .update({
-      status: 'pending_operator_approval',
+      status: 'confirmed',
       payment_id: resolvedPaymentReference,
       paid_at: nowIso,
+      lock_expires_at: null,
       updated_at: nowIso,
     })
     .eq('id', canonicalReservationId);
@@ -590,7 +637,7 @@ export async function listReservationsByOperator(
   const { data, error } = await supabase
     .from('tbl_reservations')
     .select(
-      'id, full_name, passenger_email, contact_number, pickup_location, route, seat_count, amount_due, status, created_at, paid_at'
+      'id, full_name, passenger_email, contact_number, pickup_location, route, seat_labels, seat_count, amount_due, status, payment_id, created_at, paid_at'
     )
     .eq('operator_user_id', operatorUserId)
     .order('created_at', { ascending: false })
@@ -719,17 +766,72 @@ export async function updateReservationStatusByOperator(input: {
   status: 'confirmed' | 'rejected' | 'picked_up';
 }) {
   const supabase = getServiceClient();
+  const nextStatus = input.status === 'confirmed' ? 'pending_payment' : input.status;
+  const nextPaymentLockExpiresAt =
+    input.status === 'confirmed' ? paymentLockExpiresAtIso() : null;
+  const updatePayload: Record<string, unknown> = {
+    status: nextStatus,
+    updated_at: new Date().toISOString(),
+  };
+  if (input.status === 'confirmed') {
+    updatePayload.lock_expires_at = nextPaymentLockExpiresAt;
+  }
   const allowedCurrentStatuses =
     input.status === 'picked_up'
-      ? ['confirmed', 'pending_operator_approval', 'paid']
-      : ['pending_payment', 'pending_operator_approval', 'paid'];
+      ? ['confirmed', 'pending_operator_approval', 'paid', 'departed']
+      : ['pending_operator_approval'];
+
+  if (input.status === 'picked_up') {
+    const { data: reservationRows, error: reservationReadError } = await supabase
+      .from('tbl_reservations')
+      .select('id, queue_id, status')
+      .eq('id', input.reservationId)
+      .eq('operator_user_id', input.operatorUserId)
+      .limit(1);
+
+    if (reservationReadError) {
+      throw new Error(
+        reservationReadError.message || 'Failed to validate pickup status.'
+      );
+    }
+
+    const reservation = reservationRows?.[0] as
+      | { id: string; queue_id?: string | null; status?: string | null }
+      | undefined;
+
+    if (!reservation) {
+      throw new Error('Reservation not found or status cannot be changed.');
+    }
+
+    const queueId = String(reservation.queue_id || '').trim();
+    if (!queueId) {
+      throw new Error('Pickup requires an active departed queue.');
+    }
+
+    const { data: queueRows, error: queueReadError } = await supabase
+      .from('tbl_van_queue')
+      .select('status')
+      .eq('id', queueId)
+      .eq('operator_user_id', input.operatorUserId)
+      .limit(1);
+
+    if (queueReadError) {
+      throw new Error(queueReadError.message || 'Failed to validate queue status.');
+    }
+
+    const queueStatus = String(queueRows?.[0]?.status || '')
+      .trim()
+      .toLowerCase();
+    if (queueStatus !== 'departed') {
+      throw new Error(
+        'Pickup can only be marked after the van is departed.'
+      );
+    }
+  }
 
   const { data: rows, error } = await supabase
     .from('tbl_reservations')
-    .update({
-      status: input.status,
-      updated_at: new Date().toISOString(),
-    })
+    .update(updatePayload)
     .eq('id', input.reservationId)
     .eq('operator_user_id', input.operatorUserId)
     .in('status', allowedCurrentStatuses)
@@ -742,11 +844,12 @@ export async function updateReservationStatusByOperator(input: {
   if (!rows?.[0]) throw new Error('Reservation not found or status cannot be changed.');
 
   if (input.status === 'confirmed') {
+    const lockExpiryValue = nextPaymentLockExpiresAt || paymentLockExpiresAtIso();
     const { error: lockError } = await supabase
       .from('tbl_seat_locks')
       .update({
-        status: 'reserved',
-        expires_at: null,
+        status: 'locked',
+        expires_at: lockExpiryValue,
       })
       .eq('reservation_id', input.reservationId)
       .in('status', ['locked', 'reserved']);
@@ -795,7 +898,7 @@ export async function releaseReservationLocks(reservationId: string) {
     .from('tbl_seat_locks')
     .delete()
     .eq('reservation_id', reservationId)
-    .eq('status', 'locked');
+    .in('status', ['locked', 'reserved']);
 
   await supabase
     .from('tbl_reservations')
@@ -807,10 +910,11 @@ export async function releaseReservationLocks(reservationId: string) {
 export async function getTripSeatStatuses(tripKey: string, queueId?: string | null) {
   const supabase = getServiceClient();
   const nowIso = new Date().toISOString();
+  const nowMs = new Date(nowIso).getTime();
 
   const { data, error } = await supabase
     .from('tbl_seat_locks')
-    .select('reservation_id, seat_label, status, expires_at')
+    .select('id, reservation_id, seat_label, status, expires_at')
     .eq('trip_key', tripKey)
     .in('status', ['locked', 'reserved']);
 
@@ -831,12 +935,14 @@ export async function getTripSeatStatuses(tripKey: string, queueId?: string | nu
     id: string;
     pickup_location: string | null;
     payment_id: string | null;
+    status: string | null;
+    lock_expires_at: string | null;
   }> = [];
 
   if (reservationIds.length > 0) {
     let reservationQuery = supabase
       .from('tbl_reservations')
-      .select('id, pickup_location, payment_id')
+      .select('id, pickup_location, payment_id, status, lock_expires_at')
       .in('id', reservationIds);
 
     if (queueId) {
@@ -856,6 +962,8 @@ export async function getTripSeatStatuses(tripKey: string, queueId?: string | nu
       id: string;
       pickup_location: string | null;
       payment_id: string | null;
+      status: string | null;
+      lock_expires_at: string | null;
     }>;
 
     const relevantReservationIds = new Set(
@@ -871,28 +979,85 @@ export async function getTripSeatStatuses(tripKey: string, queueId?: string | nu
   const lockedSeats: string[] = [];
   const reservedSeats: string[] = [];
   const occupiedSeats: string[] = [];
+  const reservationById = new Map(
+    reservationRows.map((row) => [row.id, row] as const)
+  );
   const walkInReservationIds = new Set(
     reservationRows
       .filter((row) => {
         const pickup = (row.pickup_location || '').toUpperCase();
         const paymentId = (row.payment_id || '').toLowerCase();
-        return pickup === 'WALK_IN' || paymentId === 'walk_in';
+        return pickup === 'WALK_IN' || isWalkInPaymentId(paymentId);
       })
       .map((row) => row.id)
       .filter(Boolean)
   );
 
+  const demoteToLockedIds: string[] = [];
+  const releaseLockIds: string[] = [];
+
   for (const row of relevantRows) {
+    const reservation = row.reservation_id
+      ? reservationById.get(row.reservation_id)
+      : undefined;
     if (row.status === 'reserved') {
       if (row.reservation_id && walkInReservationIds.has(row.reservation_id)) {
         occupiedSeats.push(row.seat_label);
       } else {
-        reservedSeats.push(row.seat_label);
+        const isPaid =
+          reservation && isPaidReservationStatus(reservation.status || null);
+        if (isPaid) {
+          reservedSeats.push(row.seat_label);
+          continue;
+        }
+
+        const fallbackExpiry = String(
+          reservation?.lock_expires_at || row.expires_at || ''
+        ).trim();
+        const fallbackExpiryMs = fallbackExpiry
+          ? new Date(fallbackExpiry).getTime()
+          : 0;
+
+        if (fallbackExpiryMs > nowMs) {
+          lockedSeats.push(row.seat_label);
+          if (row.id) demoteToLockedIds.push(row.id);
+        } else if (row.id) {
+          releaseLockIds.push(row.id);
+        }
       }
       continue;
     }
     if (row.status === 'locked' && row.expires_at && row.expires_at > nowIso) {
       lockedSeats.push(row.seat_label);
+    }
+  }
+
+  if (demoteToLockedIds.length > 0) {
+    const updateIso = new Date(
+      Date.now() + PAYMENT_LOCK_MINUTES * 60 * 1000
+    ).toISOString();
+    const { error: demoteError } = await supabase
+      .from('tbl_seat_locks')
+      .update({ status: 'locked', expires_at: updateIso })
+      .in('id', demoteToLockedIds);
+    if (demoteError) {
+      console.warn(
+        '[seat-statuses] Failed to demote unpaid reserved locks:',
+        demoteError.message || demoteError
+      );
+    }
+  }
+
+  if (releaseLockIds.length > 0) {
+    const { error: releaseError } = await supabase
+      .from('tbl_seat_locks')
+      .delete()
+      .in('id', releaseLockIds);
+    if (releaseError) {
+      console.warn(
+        '[seat-statuses] Failed to release expired unpaid reserved locks:',
+        releaseError.message || releaseError
+      );
     }
   }
 
@@ -910,11 +1075,142 @@ export interface OperatorSeatMapItem {
   passengerName: string | null;
   reservationId: string | null;
   source: 'reservation' | 'walk_in' | null;
+  walkInDiscounted?: boolean;
 }
 
 const VAN_SEAT_LABELS = Array.from({ length: 14 }, (_, idx) => String(idx + 1));
 
 const normalizeSeatLabel = (value: string) => value.trim();
+
+const isWalkInPaymentId = (value?: string | null) =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .startsWith('walk_in');
+
+const isPaidReservationStatus = (value?: string | null) => {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase();
+  return (
+    normalized === 'confirmed' ||
+    normalized === 'paid' ||
+    normalized === 'departed' ||
+    normalized === 'picked_up'
+  );
+};
+
+const normalizeRouteParts = (route: string) => {
+  const raw = String(route || '').trim();
+  if (!raw) {
+    return {
+      raw: '',
+      origin: '',
+      destination: '',
+    };
+  }
+
+  const normalizedArrow = raw
+    .replace(/\s*->\s*/g, '|')
+    .replace(/\s*-\s*/g, '|')
+    .replace(/\s+to\s+/gi, '|');
+
+  const parts = normalizedArrow
+    .split('|')
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (parts.length >= 2) {
+    return {
+      raw,
+      origin: parts[0],
+      destination: parts[parts.length - 1],
+    };
+  }
+
+  return {
+    raw,
+    origin: '',
+    destination: parts[0] || raw,
+  };
+};
+
+const resolveWalkInFare = async (input: {
+  supabase: any;
+  route: string;
+  isDiscounted: boolean;
+}) => {
+  const routeParts = normalizeRouteParts(input.route);
+  const candidates = Array.from(
+    new Set([routeParts.destination, routeParts.raw].filter(Boolean))
+  );
+
+  const pickBestFareRow = (rows: any[]) => {
+    if (!rows?.length) return null;
+    const vanRow =
+      rows.find((row) =>
+        String(row.vehicle_type || '')
+          .toLowerCase()
+          .includes('van')
+      ) || null;
+    return vanRow || rows[0];
+  };
+
+  let chosenRow: any = null;
+
+  if (routeParts.origin && routeParts.destination) {
+    const { data: exactRows, error: exactError } = await input.supabase
+      .from('tbl_route_fares')
+      .select('regular_fare, discount_rate, vehicle_type')
+      .eq('is_active', true)
+      .ilike('origin', routeParts.origin)
+      .ilike('destination', routeParts.destination)
+      .limit(50);
+
+    if (exactError) {
+      throw new Error(exactError.message || 'Failed to resolve walk-in fare.');
+    }
+    chosenRow = pickBestFareRow(exactRows || []);
+  }
+
+  if (!chosenRow) {
+    for (const destination of candidates) {
+      const { data: rows, error } = await input.supabase
+        .from('tbl_route_fares')
+        .select('regular_fare, discount_rate, vehicle_type')
+        .eq('is_active', true)
+        .ilike('destination', destination)
+        .limit(50);
+
+      if (error) {
+        throw new Error(error.message || 'Failed to resolve walk-in fare.');
+      }
+      chosenRow = pickBestFareRow(rows || []);
+      if (chosenRow) break;
+    }
+  }
+
+  const regularFare = Number(chosenRow?.regular_fare || 0);
+  if (!Number.isFinite(regularFare) || regularFare <= 0) {
+    return {
+      amountDue: 0,
+      regularFare: 0,
+      discountRate: 0,
+    };
+  }
+
+  const rawDiscountRate = Number(chosenRow?.discount_rate || 0);
+  const discountRate = Math.min(Math.max(rawDiscountRate, 0), 1);
+  const amountDue = input.isDiscounted
+    ? regularFare * (1 - discountRate)
+    : regularFare;
+
+  return {
+    amountDue: Number(amountDue.toFixed(2)),
+    regularFare: Number(regularFare.toFixed(2)),
+    discountRate,
+  };
+};
 
 export async function getOperatorTripSeatMap(input: {
   operatorUserId: string;
@@ -923,10 +1219,11 @@ export async function getOperatorTripSeatMap(input: {
 }) {
   const supabase = getServiceClient();
   const nowIso = new Date().toISOString();
+  const nowMs = new Date(nowIso).getTime();
 
   const { data: lockRows, error: lockError } = await supabase
     .from('tbl_seat_locks')
-    .select('reservation_id, seat_label, status, expires_at')
+    .select('id, reservation_id, seat_label, status, expires_at')
     .eq('trip_key', input.tripKey)
     .in('status', ['locked', 'reserved']);
 
@@ -946,7 +1243,9 @@ export async function getOperatorTripSeatMap(input: {
   if (reservationIds.length > 0) {
     let reservationQuery = supabase
       .from('tbl_reservations')
-      .select('id, full_name, operator_user_id, pickup_location, payment_id')
+      .select(
+        'id, full_name, operator_user_id, pickup_location, payment_id, status, lock_expires_at'
+      )
       .in('id', reservationIds)
       .eq('operator_user_id', input.operatorUserId);
     if (input.queueId) {
@@ -974,6 +1273,9 @@ export async function getOperatorTripSeatMap(input: {
     });
   }
 
+  const demoteToLocked: Array<{ id: string; expiresAt: string }> = [];
+  const releaseLockIds: string[] = [];
+
   for (const lock of activeSeatLocks) {
     const seatLabel = normalizeSeatLabel(String(lock.seat_label || ''));
     if (!bySeat.has(seatLabel)) continue;
@@ -982,15 +1284,87 @@ export async function getOperatorTripSeatMap(input: {
 
     const isWalkIn =
       (reservation.pickup_location || '').toUpperCase() === 'WALK_IN' ||
-      (reservation.payment_id || '').toLowerCase() === 'walk_in';
+      isWalkInPaymentId(reservation.payment_id);
+    const paymentIdLower = String(reservation.payment_id || '')
+      .trim()
+      .toLowerCase();
+    const walkInDiscounted = paymentIdLower.startsWith('walk_in_discounted');
+    const isPaidReservation = isPaidReservationStatus(reservation.status || null);
+
+    let effectiveSeatStatus: 'locked' | 'reserved' =
+      lock.status === 'locked' ? 'locked' : 'reserved';
+    let shouldDemoteReservedLock = false;
+    let shouldReleaseReservedLock = false;
+
+    if (!isWalkIn && lock.status === 'reserved' && !isPaidReservation) {
+      const fallbackExpiry = String(
+        reservation.lock_expires_at || lock.expires_at || ''
+      ).trim();
+      const fallbackExpiryMs = fallbackExpiry
+        ? new Date(fallbackExpiry).getTime()
+        : 0;
+      if (fallbackExpiryMs > nowMs) {
+        effectiveSeatStatus = 'locked';
+        shouldDemoteReservedLock = true;
+      } else {
+        shouldReleaseReservedLock = true;
+      }
+    }
+
+    if (shouldReleaseReservedLock) {
+      if (lock.id) releaseLockIds.push(lock.id);
+      continue;
+    }
 
     bySeat.set(seatLabel, {
       seatLabel,
-      status: lock.status === 'locked' ? 'locked' : 'reserved',
+      status: effectiveSeatStatus,
       passengerName: reservation.full_name || null,
       reservationId: reservation.id || null,
       source: isWalkIn ? 'walk_in' : 'reservation',
+      walkInDiscounted,
     });
+
+    if (shouldDemoteReservedLock && lock.id) {
+      const lockExpiryValue = String(
+        reservation.lock_expires_at || paymentLockExpiresAtIso()
+      ).trim();
+      demoteToLocked.push({
+        id: lock.id,
+        expiresAt: lockExpiryValue,
+      });
+    }
+  }
+
+  if (demoteToLocked.length > 0) {
+    for (const item of demoteToLocked) {
+      const { error: demoteError } = await supabase
+        .from('tbl_seat_locks')
+        .update({
+          status: 'locked',
+          expires_at: item.expiresAt,
+        })
+        .eq('id', item.id);
+      if (demoteError) {
+        console.warn(
+          '[operator-seat-map] Failed to demote unpaid reserved lock:',
+          demoteError.message || demoteError
+        );
+      }
+    }
+  }
+
+  if (releaseLockIds.length > 0) {
+    const { error: releaseError } = await supabase
+      .from('tbl_seat_locks')
+      .delete()
+      .in('id', releaseLockIds);
+    if (releaseError) {
+      console.warn(
+        '[operator-seat-map] Failed to release expired unpaid reserved lock:',
+        releaseError.message || releaseError
+      );
+    }
   }
 
   return {
@@ -1005,11 +1379,13 @@ export async function assignWalkInSeat(input: {
   tripKey: string;
   seatLabel: string;
   passengerName: string;
+  isDiscounted?: boolean;
   queueId?: string | null;
 }) {
   const supabase = getServiceClient();
   const nowIso = new Date().toISOString();
   const seatLabel = normalizeSeatLabel(input.seatLabel);
+  const isDiscounted = !!input.isDiscounted;
 
   if (!VAN_SEAT_LABELS.includes(seatLabel)) {
     throw new Error('Invalid seat label.');
@@ -1040,6 +1416,13 @@ export async function assignWalkInSeat(input: {
     nowIso,
   });
 
+  const fare = await resolveWalkInFare({
+    supabase,
+    route: input.route,
+    isDiscounted,
+  });
+  const walkInPaymentId = isDiscounted ? 'walk_in_discounted' : 'walk_in';
+
   const { data: reservationRows, error: reservationError } = await supabase
     .from('tbl_reservations')
     .insert({
@@ -1048,9 +1431,9 @@ export async function assignWalkInSeat(input: {
       pickup_location: 'WALK_IN',
       route: input.route,
       seat_count: 1,
-      amount_due: 0,
+      amount_due: fare.amountDue,
       status: 'confirmed',
-      payment_id: 'walk_in',
+      payment_id: walkInPaymentId,
       paid_at: nowIso,
       trip_key: input.tripKey,
       queue_id: input.queueId || null,
@@ -1148,7 +1531,7 @@ export async function releaseWalkInSeat(input: {
 
   const isWalkIn =
     (reservation.pickup_location || '').toUpperCase() === 'WALK_IN' ||
-    (reservation.payment_id || '').toLowerCase() === 'walk_in';
+    isWalkInPaymentId(reservation.payment_id);
   if (!isWalkIn) {
     throw new Error('Only walk-in occupied seats can be released manually.');
   }

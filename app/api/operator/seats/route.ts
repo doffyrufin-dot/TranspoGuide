@@ -82,6 +82,7 @@ export async function POST(req: NextRequest) {
     const tripKey = (body.tripKey || '').trim();
     const seatLabel = (body.seatLabel || '').trim();
     const passengerName = (body.passengerName || '').trim();
+    const isDiscounted = !!body.isDiscounted;
     const queueId = (body.queueId || '').trim() || null;
 
     if (!route || !tripKey || !seatLabel || !passengerName) {
@@ -94,6 +95,7 @@ export async function POST(req: NextRequest) {
       tripKey,
       seatLabel,
       passengerName,
+      isDiscounted,
       queueId,
     });
 

@@ -3,18 +3,44 @@ import { createClient } from '@supabase/supabase-js';
 import { markReservationsDepartedForQueue } from '@/lib/db/reservations';
 
 type QueueAction = 'join' | 'leave' | 'boarding';
+type ActiveQueueEntry = {
+  id: string;
+  route: string | null;
+  status: string | null;
+  queue_position: number | null;
+  departure_time: string | null;
+  plate_number: string | null;
+  driver_name: string | null;
+};
 
 const ACTIVE_STATUSES = ['queued', 'boarding'];
 
 const normalizeEmail = (value?: string | null) =>
   (value || '').trim().toLowerCase();
 
+const normalizeRouteKey = (value?: string | null) =>
+  (value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+
+const toRouteLabel = (value?: string | null) => {
+  const normalized = normalizeRouteKey(value);
+  if (!normalized) return '';
+  return normalized
+    .split(' ')
+    .map((part) =>
+      part ? part.charAt(0).toUpperCase() + part.slice(1) : part
+    )
+    .join(' ');
+};
+
 const toIsoFromTime = (value?: string | null) => {
   const raw = (value || '').trim();
   if (!raw) return null;
   const match = raw.match(/^(\d{2}):(\d{2})$/);
   if (!match) return null;
-  const [_, hh, mm] = match;
+  const [, hh, mm] = match;
   const now = new Date();
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, '0');
@@ -172,21 +198,29 @@ async function sendDepartedNotificationEmail(params: {
 }
 
 async function reorderRoutePositions(serviceClient: any, route: string) {
+  const routeKey = normalizeRouteKey(route);
+  if (!routeKey) return;
+
   const { data: rows, error } = await serviceClient
     .from('tbl_van_queue')
-    .select('id, queue_position')
-    .eq('route', route)
+    .select('id, queue_position, status')
+    .ilike('route', routeKey)
     .in('status', ACTIVE_STATUSES)
     .order('queue_position', { ascending: true })
     .order('id', { ascending: true });
 
   if (error || !rows?.length) return;
+  const nowIso = new Date().toISOString();
 
   await Promise.all(
     rows.map((row: any, index: number) =>
       (serviceClient as any)
         .from('tbl_van_queue')
-        .update({ queue_position: index + 1 })
+        .update({
+          queue_position: index + 1,
+          status: index === 0 ? 'boarding' : 'queued',
+          updated_at: nowIso,
+        })
         .eq('id', row.id)
     )
   );
@@ -225,6 +259,7 @@ export async function POST(request: NextRequest) {
 
     const payload = (await request.json()) as {
       action?: QueueAction;
+      queueId?: string;
       route?: string;
       driverName?: string;
       departureTime?: string;
@@ -265,23 +300,59 @@ export async function POST(request: NextRequest) {
       user.user_metadata?.name ||
       'Operator';
     const operatorEmail = normalizeEmail(roleRows?.[0]?.email || user.email);
+    const requestedQueueId = String(payload.queueId || '').trim();
 
-    const { data: activeRows } = await serviceClient
-      .from('tbl_van_queue')
-      .select(
-        'id, route, status, queue_position, departure_time, plate_number, driver_name'
-      )
-      .eq('operator_user_id', user.id)
-      .in('status', ACTIVE_STATUSES)
-      .order('queue_position', { ascending: true })
-      .limit(1);
-    const activeEntry = activeRows?.[0];
+    let activeEntry: ActiveQueueEntry | null = null;
+
+    if (requestedQueueId) {
+      const { data: targetedRows, error: targetedError } = await serviceClient
+        .from('tbl_van_queue')
+        .select(
+          'id, route, status, queue_position, departure_time, plate_number, driver_name'
+        )
+        .eq('id', requestedQueueId)
+        .eq('operator_user_id', user.id)
+        .in('status', ACTIVE_STATUSES)
+        .limit(1);
+
+      if (targetedError) {
+        return NextResponse.json(
+          { error: targetedError.message || 'queue_lookup_failed' },
+          { status: 500 }
+        );
+      }
+      activeEntry = ((targetedRows?.[0] || null) as ActiveQueueEntry | null);
+    }
+
+    if (!activeEntry) {
+      const { data: activeRows, error: activeError } = await serviceClient
+        .from('tbl_van_queue')
+        .select(
+          'id, route, status, queue_position, departure_time, plate_number, driver_name'
+        )
+        .eq('operator_user_id', user.id)
+        .in('status', ACTIVE_STATUSES)
+        .order('queue_position', { ascending: true })
+        .limit(1);
+
+      if (activeError) {
+        return NextResponse.json(
+          { error: activeError.message || 'queue_lookup_failed' },
+          { status: 500 }
+        );
+      }
+      activeEntry = ((activeRows?.[0] || null) as ActiveQueueEntry | null);
+    }
 
     if (action === 'leave') {
+      if (requestedQueueId && !activeEntry?.id) {
+        return NextResponse.json({ error: 'queue_entry_not_found' }, { status: 404 });
+      }
       if (!activeEntry?.id) {
         return NextResponse.json({ ok: true, left: false, queue: null });
       }
-      const isDeparting = String(activeEntry.status || '').toLowerCase() === 'boarding';
+      const currentEntry = activeEntry;
+      const isDeparting = String(currentEntry.status || '').toLowerCase() === 'boarding';
       const nextStatus = isDeparting ? 'departed' : 'cancelled';
       const { error: leaveError } = await serviceClient
         .from('tbl_van_queue')
@@ -289,7 +360,7 @@ export async function POST(request: NextRequest) {
           status: nextStatus,
           updated_at: new Date().toISOString(),
         })
-        .eq('id', activeEntry.id);
+        .eq('id', currentEntry.id);
       if (leaveError) {
         return NextResponse.json(
           { error: leaveError.message || 'leave_failed' },
@@ -299,7 +370,7 @@ export async function POST(request: NextRequest) {
 
       if (isDeparting) {
         const departedResult = await markReservationsDepartedForQueue({
-          queueId: activeEntry.id,
+          queueId: currentEntry.id,
           operatorUserId: user.id,
           senderName: operatorName,
         });
@@ -315,22 +386,22 @@ export async function POST(request: NextRequest) {
               to: normalizeEmail(row.passenger_email),
               fullName: row.full_name || 'Passenger',
               reservationId: row.id,
-              route: row.route || activeEntry.route || '',
+              route: row.route || currentEntry.route || '',
               seatLabels: Array.isArray(row.seat_labels) ? row.seat_labels : [],
               seatCount:
                 typeof row.seat_count === 'number' && Number.isFinite(row.seat_count)
                   ? row.seat_count
                   : null,
               operatorName,
-              plateNumber: activeEntry.plate_number || '',
-              departureTime: activeEntry.departure_time || null,
+              plateNumber: currentEntry.plate_number || '',
+              departureTime: currentEntry.departure_time || null,
             })
           )
         );
       }
 
-      if (activeEntry.route) {
-        await reorderRoutePositions(serviceClient, activeEntry.route);
+      if (currentEntry.route) {
+        await reorderRoutePositions(serviceClient, currentEntry.route);
       }
       return NextResponse.json({
         ok: true,
@@ -341,6 +412,9 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'boarding') {
+      if (requestedQueueId && !activeEntry?.id) {
+        return NextResponse.json({ error: 'queue_entry_not_found' }, { status: 404 });
+      }
       if (!activeEntry?.id) {
         return NextResponse.json({ error: 'not_in_queue' }, { status: 400 });
       }
@@ -352,10 +426,42 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      await reorderRoutePositions(serviceClient, activeEntry.route);
+
+      const { data: refreshedRows, error: refreshedError } = await serviceClient
+        .from('tbl_van_queue')
+        .select(
+          'id, route, status, queue_position, departure_time, plate_number, driver_name'
+        )
+        .eq('id', activeEntry.id)
+        .eq('operator_user_id', user.id)
+        .in('status', ACTIVE_STATUSES)
+        .limit(1);
+      if (refreshedError) {
+        return NextResponse.json(
+          { error: refreshedError.message || 'queue_lookup_failed' },
+          { status: 500 }
+        );
+      }
+      activeEntry = ((refreshedRows?.[0] || null) as ActiveQueueEntry | null);
+      if (!activeEntry?.id) {
+        return NextResponse.json({ error: 'not_in_queue' }, { status: 400 });
+      }
+      if (String(activeEntry.status || '').toLowerCase() === 'boarding') {
+        return NextResponse.json({ ok: true, boarding: true, auto: true });
+      }
+
+      const activeRouteKey = normalizeRouteKey(activeEntry.route);
+      if (!activeRouteKey) {
+        return NextResponse.json(
+          { error: 'route_required_for_boarding' },
+          { status: 400 }
+        );
+      }
       const { data: firstRows, error: firstError } = await serviceClient
         .from('tbl_van_queue')
         .select('id, queue_position')
-        .eq('route', activeEntry.route)
+        .ilike('route', activeRouteKey)
         .in('status', ACTIVE_STATUSES)
         .order('queue_position', { ascending: true })
         .limit(1);
@@ -390,12 +496,27 @@ export async function POST(request: NextRequest) {
 
     // join
     if (activeEntry?.id) {
+      if (activeEntry.route) {
+        await reorderRoutePositions(serviceClient, activeEntry.route);
+        const { data: refreshedRows } = await serviceClient
+          .from('tbl_van_queue')
+          .select(
+            'id, route, status, queue_position, departure_time, plate_number, driver_name'
+          )
+          .eq('id', activeEntry.id)
+          .eq('operator_user_id', user.id)
+          .in('status', ACTIVE_STATUSES)
+          .limit(1);
+        if (refreshedRows?.[0]) {
+          activeEntry = refreshedRows[0] as ActiveQueueEntry;
+        }
+      }
       return NextResponse.json({
         ok: true,
         alreadyQueued: true,
         queue: {
           id: activeEntry.id,
-          route: activeEntry.route || '',
+          route: toRouteLabel(activeEntry.route || ''),
           status: activeEntry.status || 'queued',
           position: Number(activeEntry.queue_position || 0),
           plate: activeEntry.plate_number || 'N/A',
@@ -407,17 +528,18 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const route = (payload.route || '').trim();
-    if (!route) {
+    const routeKey = normalizeRouteKey(payload.route);
+    if (!routeKey) {
       return NextResponse.json({ error: 'route_required' }, { status: 400 });
     }
+    const route = toRouteLabel(routeKey);
 
     const driverName = (payload.driverName || '').trim() || operatorName;
 
     const { data: lastRows } = await serviceClient
       .from('tbl_van_queue')
       .select('queue_position')
-      .eq('route', route)
+      .ilike('route', routeKey)
       .in('status', ACTIVE_STATUSES)
       .order('queue_position', { ascending: false })
       .limit(1);
@@ -469,7 +591,7 @@ export async function POST(request: NextRequest) {
       joined: true,
       queue: {
         id: row.id,
-        route: row.route || route,
+        route: toRouteLabel(row.route || route),
         status: row.status || 'queued',
         position: Number(row.queue_position || nextPosition),
         plate: row.plate_number || plateNumber,

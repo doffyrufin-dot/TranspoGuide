@@ -15,12 +15,15 @@ export interface OperatorPaymentRecord {
 export interface OperatorReservationRecord {
   id: string;
   full_name: string;
+  passenger_email?: string | null;
   contact_number: string;
   pickup_location: string;
   route: string;
+  seat_labels?: string[] | null;
   seat_count: number;
   amount_due: number;
   status: string;
+  payment_id?: string | null;
   created_at: string;
   paid_at: string | null;
   latest_message?: string | null;
@@ -60,6 +63,15 @@ export interface OperatorBoardingQueueInfo {
 export interface OperatorPassengersResult {
   queue: OperatorBoardingQueueInfo | null;
   passengers: OperatorBoardingPassenger[];
+  pagination?: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+  };
+  activeTripKey?: string | null;
 }
 
 export interface OperatorUnreadChatThread {
@@ -88,6 +100,30 @@ export interface OperatorPaymentHistoryResult {
     month: number;
   };
   payments: OperatorPaymentRecord[];
+  pagination?: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    hasNext: boolean;
+    hasPrev: boolean;
+  };
+}
+
+export interface OperatorRatingFeedbackItem {
+  id: string;
+  reservation_id: string;
+  rating: number;
+  feedback: string | null;
+  commuter_name: string | null;
+  created_at: string;
+}
+
+export interface OperatorRatingSummaryResult {
+  average_rating: number;
+  review_count: number;
+  trusted: boolean;
+  recent_feedback: OperatorRatingFeedbackItem[];
 }
 
 export interface OperatorReservationListResult {
@@ -95,11 +131,39 @@ export interface OperatorReservationListResult {
   history: OperatorReservationRecord[];
 }
 
+export interface OperatorPaymentAccountStatusResult {
+  setupRequired: boolean;
+  hasActiveAccount: boolean;
+  hasSecretKey: boolean;
+  hasWebhookSecret: boolean;
+  webhookSecretSupported: boolean;
+  applicationStatus: 'pending' | 'approved' | 'rejected' | null;
+  activeAccountId: string | null;
+  maskedSecretKey: string | null;
+}
+
+export interface OperatorProfileResult {
+  fullName: string;
+  email: string;
+  avatarUrl: string;
+  contactNumber: string;
+  applicationStatus: 'pending' | 'approved' | 'rejected' | null;
+}
+
 export async function fetchOperatorPaymentHistory(
-  accessToken: string
+  accessToken: string,
+  options?: { page?: number; pageSize?: number }
 ): Promise<OperatorPaymentHistoryResult> {
+  const params = new URLSearchParams();
+  if (options?.page && Number.isFinite(options.page)) {
+    params.set('page', String(Math.max(1, Math.floor(options.page))));
+  }
+  if (options?.pageSize && Number.isFinite(options.pageSize)) {
+    params.set('pageSize', String(Math.max(1, Math.floor(options.pageSize))));
+  }
+
   const { data } = await http.get<OperatorPaymentHistoryResult>(
-    '/api/operator/payments',
+    `/api/operator/payments${params.toString() ? `?${params.toString()}` : ''}`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -185,11 +249,38 @@ export async function sendOperatorReservationMessage(input: {
   return data.message;
 }
 
+export async function markOperatorReservationChatSeen(input: {
+  accessToken: string;
+  reservationId: string;
+}) {
+  const { data } = await http.patch(
+    '/api/operator/reservations/chat',
+    {
+      reservationId: input.reservationId,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+      },
+    }
+  );
+  return data;
+}
+
 export async function fetchOperatorBoardingPassengers(
-  accessToken: string
+  accessToken: string,
+  options?: { page?: number; pageSize?: number }
 ): Promise<OperatorPassengersResult> {
+  const params = new URLSearchParams();
+  if (options?.page && Number.isFinite(options.page)) {
+    params.set('page', String(Math.max(1, Math.floor(options.page))));
+  }
+  if (options?.pageSize && Number.isFinite(options.pageSize)) {
+    params.set('pageSize', String(Math.max(1, Math.floor(options.pageSize))));
+  }
+
   const { data } = await http.get<OperatorPassengersResult>(
-    '/api/operator/passengers',
+    `/api/operator/passengers${params.toString() ? `?${params.toString()}` : ''}`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -224,6 +315,90 @@ export async function fetchOperatorChatConversations(
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
+}
+
+export async function fetchOperatorRatingSummary(
+  accessToken: string
+): Promise<OperatorRatingSummaryResult> {
+  const { data } = await http.get<OperatorRatingSummaryResult>(
+    '/api/operator/ratings',
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
+}
+
+export async function fetchOperatorPaymentAccountStatus(
+  accessToken: string
+): Promise<OperatorPaymentAccountStatusResult> {
+  const { data } = await http.get<OperatorPaymentAccountStatusResult>(
+    '/api/operator/payment-account',
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Cache-Control': 'no-store',
+      },
+    }
+  );
+  return data;
+}
+
+export async function saveOperatorPaymentAccount(input: {
+  accessToken: string;
+  paymongoSecretKey: string;
+  paymongoWebhookSecret?: string;
+}): Promise<OperatorPaymentAccountStatusResult> {
+  const { data } = await http.put<OperatorPaymentAccountStatusResult>(
+    '/api/operator/payment-account',
+    {
+      paymongoSecretKey: input.paymongoSecretKey,
+      paymongoWebhookSecret: input.paymongoWebhookSecret || '',
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+      },
+    }
+  );
+  return data;
+}
+
+export async function fetchOperatorProfile(
+  accessToken: string
+): Promise<OperatorProfileResult> {
+  const { data } = await http.get<OperatorProfileResult>('/api/operator/profile', {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Cache-Control': 'no-store',
+    },
+  });
+  return data;
+}
+
+export async function saveOperatorProfile(input: {
+  accessToken: string;
+  fullName: string;
+  avatarUrl?: string;
+  contactNumber?: string;
+}): Promise<OperatorProfileResult> {
+  const { data } = await http.put<OperatorProfileResult>(
+    '/api/operator/profile',
+    {
+      fullName: input.fullName,
+      avatarUrl: input.avatarUrl || '',
+      contactNumber: input.contactNumber || '',
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
       },
     }
   );

@@ -359,30 +359,54 @@ const LoginPage = () => {
     setLoading(true);
     setSigningMethod('email');
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password,
+        }),
       });
-      if (error) {
-        const lowerMsg = (error.message || '').toLowerCase();
-        const isInvalidCredentials =
-          lowerMsg.includes('invalid login credentials') ||
-          lowerMsg.includes('invalid credentials');
+      const payload = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
         sileoToast.error({
           title: 'Login failed',
-          description: isInvalidCredentials
-            ? 'Invalid credentials. If this account was created with Google, use Google login or click Forgot to set an email password.'
-            : error.message,
+          description:
+            payload?.error ||
+            'Invalid credentials. If this account was created with Google, use Google login or click Forgot to set an email password.',
         });
         return;
       }
-      if (data.session) {
-        await redirectByRole(
-          data.session.user.id,
-          email,
-          data.session.access_token
-        );
+
+      const accessToken = String(
+        payload?.session?.access_token || payload?.access_token || ''
+      ).trim();
+      const refreshToken = String(payload?.session?.refresh_token || '').trim();
+      const userId = String(payload?.user?.id || '').trim();
+
+      if (!accessToken || !refreshToken || !userId) {
+        sileoToast.error({
+          title: 'Login failed',
+          description: 'Missing session data from server. Please try again.',
+        });
+        return;
       }
+
+      const { error: setSessionError } = await supabase.auth.setSession({
+        access_token: accessToken,
+        refresh_token: refreshToken,
+      });
+
+      if (setSessionError) {
+        sileoToast.error({
+          title: 'Login failed',
+          description: setSessionError.message || 'Unable to save login session.',
+        });
+        return;
+      }
+
+      await redirectByRole(userId, email, accessToken);
     } finally {
       if (!navigatingRef.current) {
         setLoading(false);
@@ -598,9 +622,14 @@ const LoginPage = () => {
             >
               <FaRoute size={16} />
             </div>
+<<<<<<< HEAD
             <span className="text-xl font-bold text-white cursor-pointer">
               <Link href={'/'}>
                 {' '}
+=======
+            <span className="text-xl font-bold text-white">
+              <Link href={'/'}>
+>>>>>>> 8a818bca7aea478f34a0909c19490afcff2cf34c
                 Transpo
                 <span style={{ color: 'var(--primary-light)' }}>Guide</span>
               </Link>

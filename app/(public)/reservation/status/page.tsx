@@ -1,31 +1,44 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'next/navigation';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '@/utils/supabase/client';
 import { MessageCircle, Smile, X } from 'lucide-react';
 import {
+  createCheckoutSession,
   fetchReservationStatus,
   sendReservationMessage,
+  submitReservationOperatorFeedback,
+  type ReservationOperatorFeedback,
   type ReservationMessage,
   type ReservationStatusResult,
   type ReservationStatusPayload,
 } from '@/lib/services/payment.services';
 import sileoToast from '@/lib/utils/sileo-toast';
+import playNotificationSound from '@/lib/utils/notification-sound';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { FaCheckCircle, FaClock, FaComments, FaPaperPlane } from 'react-icons/fa';
+import {
+  FaCheckCircle,
+  FaClock,
+  FaComments,
+  FaPaperPlane,
+  FaStar,
+} from 'react-icons/fa';
 
 const statusLabel = (status?: string) => {
   switch ((status || '').toLowerCase()) {
-    case 'paid':
     case 'pending_operator_approval':
-      return 'Paid - Waiting for operator confirmation';
+      return 'Pending Operator Approval';
+    case 'pending_payment':
+      return 'Operator Approved - Pay Downpayment';
+    case 'paid':
+      return 'Paid';
     case 'confirmed':
-      return 'Confirmed';
+      return 'Confirmed and Paid';
     case 'departed':
       return 'Van Departed';
     case 'rejected':
@@ -34,19 +47,28 @@ const statusLabel = (status?: string) => {
       return 'Cancelled';
     case 'picked_up':
       return 'Picked Up - Trip completed';
-    case 'pending_payment':
-      return 'Pending Payment';
     default:
       return status || 'Unknown';
   }
 };
 
-const STATUS_POLL_INTERVAL_MS = 12000;
+const STATUS_POLL_INTERVAL_MS = 6000;
+const STATUS_REALTIME_DEBOUNCE_MS = 120;
+const isDocumentVisible = () =>
+  typeof document === 'undefined' || document.visibilityState === 'visible';
+const isExpiredByIso = (value?: string | null) => {
+  const iso = String(value || '').trim();
+  if (!iso) return false;
+  const expiresAtMs = new Date(iso).getTime();
+  if (!Number.isFinite(expiresAtMs)) return false;
+  return expiresAtMs <= Date.now();
+};
 
 export default function ReservationStatusPage() {
   const searchParams = useSearchParams();
   const reservationId = searchParams.get('reservation_id') || '';
   const reservationToken = searchParams.get('reservation_token') || '';
+  const reservedFlag = searchParams.get('reserved') || '';
   const paymentFlag = searchParams.get('payment') || '';
   const paymentReference =
     searchParams.get('payment_reference') ||
@@ -62,16 +84,32 @@ export default function ReservationStatusPage() {
   const [operator, setOperator] = useState<{ name: string; email: string } | null>(
     null
   );
+  const [operatorFeedback, setOperatorFeedback] =
+    useState<ReservationOperatorFeedback | null>(null);
   const [messages, setMessages] = useState<ReservationMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [sending, setSending] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  const [isCreatingCheckout, setIsCreatingCheckout] = useState(false);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentModalError, setPaymentModalError] = useState('');
+  const [hasAcceptedPaymentTerms, setHasAcceptedPaymentTerms] = useState(false);
+  const [showRatingModal, setShowRatingModal] = useState(false);
+  const [ratingScore, setRatingScore] = useState(5);
+  const [ratingFeedback, setRatingFeedback] = useState('');
+  const [ratingSubmitting, setRatingSubmitting] = useState(false);
+  const [ratingError, setRatingError] = useState('');
   const [mounted, setMounted] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const chatBodyRef = React.useRef<HTMLDivElement | null>(null);
   const hasConfirmedPaymentRef = React.useRef(false);
   const chatRealtimeRef = React.useRef<RealtimeChannel | null>(null);
+  const statusRealtimeRef = React.useRef<RealtimeChannel | null>(null);
+  const reserveToastShownRef = React.useRef(false);
+  const paymentPromptShownRef = React.useRef(false);
+  const paymentExpiredToastShownRef = React.useRef(false);
+  const previousStatusRef = React.useRef('');
   const chatOpenRef = React.useRef(false);
   const seenMessagesInitializedRef = React.useRef(false);
   const seenMessageIdsRef = React.useRef<Set<string>>(new Set());
@@ -99,7 +137,7 @@ export default function ReservationStatusPage() {
     });
   }, []);
 
-  const loadStatus = async (
+  const loadStatus = useCallback(async (
     options?: { silent?: boolean }
   ): Promise<ReservationStatusResult | null> => {
     const silent = !!options?.silent;
@@ -108,6 +146,7 @@ export default function ReservationStatusPage() {
       const data = await fetchReservationStatus(reservationId, reservationToken);
       setReservation(data.reservation);
       setOperator(data.operator);
+      setOperatorFeedback(data.feedback || null);
       setMessages(data.messages);
       return data;
     } catch (error: any) {
@@ -120,6 +159,115 @@ export default function ReservationStatusPage() {
       return null;
     } finally {
       setLoading(false);
+    }
+  }, [reservationId, reservationToken]);
+
+  const isPendingPaymentStatus =
+    String(reservation?.status || '').toLowerCase() === 'pending_payment';
+  const isPaymentWindowExpired =
+    isPendingPaymentStatus && isExpiredByIso(reservation?.lock_expires_at);
+  const isAwaitingDownpayment =
+    isPendingPaymentStatus && !isPaymentWindowExpired;
+  const canRateOperator = (() => {
+    const status = String(reservation?.status || '').toLowerCase();
+    return (
+      !!reservationId &&
+      !!reservationToken &&
+      !!operator &&
+      (status === 'confirmed' ||
+        status === 'paid' ||
+        status === 'departed' ||
+        status === 'picked_up')
+    );
+  })();
+
+  const openRatingModal = () => {
+    setRatingScore(5);
+    setRatingFeedback('');
+    setRatingError('');
+    setShowRatingModal(true);
+  };
+
+  const handleSubmitOperatorRating = async () => {
+    if (!canRateOperator || !reservationId || !reservationToken) return;
+    if (operatorFeedback) {
+      setShowRatingModal(false);
+      return;
+    }
+    if (ratingScore < 1 || ratingScore > 5) {
+      setRatingError('Please select a rating from 1 to 5 stars.');
+      return;
+    }
+
+    setRatingSubmitting(true);
+    setRatingError('');
+    try {
+      const savedFeedback = await submitReservationOperatorFeedback({
+        reservationId,
+        reservationToken,
+        rating: ratingScore,
+        feedback: ratingFeedback,
+      });
+      setOperatorFeedback(savedFeedback);
+      setShowRatingModal(false);
+      sileoToast.success({
+        title: 'Thank you for your feedback',
+        description: 'Your operator rating was submitted successfully.',
+      });
+    } catch (error: any) {
+      const message = error?.message || 'Failed to submit operator rating.';
+      setRatingError(message);
+      sileoToast.error({
+        title: 'Rating failed',
+        description: message,
+      });
+    } finally {
+      setRatingSubmitting(false);
+    }
+  };
+
+  const handleStartDownpayment = async () => {
+    if (!reservationId || !reservation || isCreatingCheckout) return;
+    if (!isAwaitingDownpayment) {
+      sileoToast.info({
+        title: 'Payment not available yet',
+        description: 'Wait for operator approval before paying downpayment.',
+      });
+      return;
+    }
+
+    setIsCreatingCheckout(true);
+    setPaymentModalError('');
+    try {
+      const seatLabels = (reservation.seat_labels || [])
+        .map((seat) => String(seat || '').trim())
+        .filter(Boolean)
+        .join(', ');
+
+      const checkoutUrl = await createCheckoutSession({
+        amount: Number(reservation.amount_due || 0),
+        seatLabels,
+        fullName: reservation.full_name || 'Passenger',
+        passengerEmail: String(reservation.passenger_email || '')
+          .trim()
+          .toLowerCase(),
+        contactNumber: reservation.contact_number || '',
+        route: reservation.route || '',
+        reservationId: reservation.id,
+        operatorUserId: reservation.operator_user_id || undefined,
+        queueId: reservation.queue_id || undefined,
+      });
+
+      window.location.href = checkoutUrl;
+    } catch (error: any) {
+      const message = error?.message || 'Failed to start payment.';
+      setPaymentModalError(message);
+      sileoToast.error({
+        title: 'Payment failed',
+        description: message,
+      });
+    } finally {
+      setIsCreatingCheckout(false);
     }
   };
 
@@ -140,6 +288,9 @@ export default function ReservationStatusPage() {
       const normalizedStatus = String(
         statusSnapshot?.reservation?.status || ''
       ).toLowerCase();
+      const snapshotPaymentExpired =
+        normalizedStatus === 'pending_payment' &&
+        isExpiredByIso(statusSnapshot?.reservation?.lock_expires_at);
       const alreadyProcessed =
         normalizedStatus === 'pending_operator_approval' ||
         normalizedStatus === 'paid' ||
@@ -150,7 +301,8 @@ export default function ReservationStatusPage() {
       if (
         paymentFlag === 'success' &&
         !hasConfirmedPaymentRef.current &&
-        !alreadyProcessed
+        !alreadyProcessed &&
+        !snapshotPaymentExpired
       ) {
         hasConfirmedPaymentRef.current = true;
         try {
@@ -169,9 +321,21 @@ export default function ReservationStatusPage() {
           }
           sileoToast.success({
             title: 'Payment received',
-            description: 'Your reservation is now under operator review.',
+            description: 'Your downpayment is received. Reservation is now confirmed.',
           });
         } catch (error: any) {
+          const message = String(error?.message || '').toLowerCase();
+          if (message.includes('payment window expired')) {
+            setShowPaymentModal(false);
+            setPaymentModalError('');
+            await loadStatus({ silent: true });
+            sileoToast.warning({
+              title: 'Payment window expired',
+              description:
+                'Your reservation expired before payment confirmation. Please reserve again.',
+            });
+            return;
+          }
           sileoToast.error({
             title: 'Payment sync failed',
             description: error?.message || 'Please refresh after a few seconds.',
@@ -183,11 +347,118 @@ export default function ReservationStatusPage() {
 
     void bootstrap();
     const timer = window.setInterval(() => {
+      if (!isDocumentVisible()) return;
       void loadStatus({ silent: true });
     }, STATUS_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reservationId, reservationToken, paymentFlag, paymentReference]);
+  }, [reservationId, reservationToken, paymentFlag, paymentReference, loadStatus]);
+
+  useEffect(() => {
+    if (!reservationId || !reservationToken) return;
+
+    let refreshTimeout: number | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimeout) return;
+      refreshTimeout = window.setTimeout(() => {
+        refreshTimeout = null;
+        if (!isDocumentVisible()) return;
+        void loadStatus({ silent: true });
+      }, STATUS_REALTIME_DEBOUNCE_MS);
+    };
+
+    const channel = supabase
+      .channel(`reservation-status-${reservationId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_reservations',
+          filter: `id=eq.${reservationId}`,
+        },
+        scheduleRefresh
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'tbl_seat_locks',
+          filter: `reservation_id=eq.${reservationId}`,
+        },
+        scheduleRefresh
+      )
+      .subscribe((status: string) => {
+        if (status === 'SUBSCRIBED') {
+          scheduleRefresh();
+        }
+      });
+
+    statusRealtimeRef.current = channel;
+
+    return () => {
+      if (refreshTimeout) {
+        window.clearTimeout(refreshTimeout);
+      }
+      if (statusRealtimeRef.current === channel) {
+        statusRealtimeRef.current = null;
+      }
+      void supabase.removeChannel(channel);
+    };
+  }, [reservationId, reservationToken, loadStatus]);
+
+  useEffect(() => {
+    if (reservedFlag !== 'success' || reserveToastShownRef.current) return;
+    reserveToastShownRef.current = true;
+    sileoToast.success({
+      title: 'Reservation submitted',
+      description: 'Please wait for operator approval before paying downpayment.',
+    });
+  }, [reservedFlag]);
+
+  useEffect(() => {
+    const normalized = String(reservation?.status || '').toLowerCase();
+    if (!normalized) return;
+
+    const previous = previousStatusRef.current;
+    previousStatusRef.current = normalized;
+
+    if (normalized !== 'pending_payment' || isPaymentWindowExpired) return;
+
+    if (!paymentPromptShownRef.current) {
+      paymentPromptShownRef.current = true;
+      setHasAcceptedPaymentTerms(false);
+      setShowPaymentModal(true);
+      return;
+    }
+
+    if (previous && previous !== normalized) {
+      playNotificationSound();
+      setHasAcceptedPaymentTerms(false);
+      setShowPaymentModal(true);
+      sileoToast.success({
+        title: 'Reservation approved',
+        description: 'Pay the downpayment now to finalize your seat.',
+      });
+    }
+  }, [reservation?.status, isPaymentWindowExpired]);
+
+  useEffect(() => {
+    const normalized = String(reservation?.status || '').toLowerCase();
+    if (normalized === 'pending_payment' && !isPaymentWindowExpired) return;
+    setShowPaymentModal(false);
+    setPaymentModalError('');
+    setHasAcceptedPaymentTerms(false);
+  }, [reservation?.status, isPaymentWindowExpired]);
+
+  useEffect(() => {
+    if (!isPaymentWindowExpired || paymentExpiredToastShownRef.current) return;
+    paymentExpiredToastShownRef.current = true;
+    sileoToast.warning({
+      title: 'Reservation expired',
+      description: 'Payment window ended. Please reserve your seat again.',
+    });
+  }, [isPaymentWindowExpired]);
 
   useEffect(() => {
     if (!reservationId || !reservationToken) return;
@@ -221,7 +492,6 @@ export default function ReservationStatusPage() {
       }
       void supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reservationId, reservationToken]);
 
   const sortedMessages = useMemo(
@@ -286,6 +556,7 @@ export default function ReservationStatusPage() {
     }
 
     if (unreadIncrement > 0) {
+      playNotificationSound();
       setChatUnreadCount((prev) => prev + unreadIncrement);
     }
   }, [sortedMessages]);
@@ -397,12 +668,14 @@ export default function ReservationStatusPage() {
 
   return (
     <>
-    <main className="px-6 py-20">
+    <main className="px-4 sm:px-6 py-16 sm:py-20 pb-28 sm:pb-20">
       <div className="max-w-5xl mx-auto space-y-6">
         <div className="card-glow rounded-2xl p-6">
-          <div className="flex items-center justify-between gap-4 mb-4">
-            <h1 className="text-2xl font-bold text-theme">Reservation Summary</h1>
-            <span className="step-badge flex items-center gap-1.5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+            <h1 className="text-2xl font-bold text-theme leading-tight">
+              Reservation Summary
+            </h1>
+            <span className="step-badge inline-flex w-full sm:w-auto items-start sm:items-center gap-1.5 leading-snug break-words">
               <FaClock size={11} /> {statusLabel(reservation.status)}
             </span>
           </div>
@@ -438,6 +711,92 @@ export default function ReservationStatusPage() {
             </div>
           </div>
 
+          {String(reservation.status || '').toLowerCase() ===
+            'pending_operator_approval' && (
+            <div
+              className="mt-5 rounded-xl p-4"
+              style={{
+                background: 'rgba(245,158,11,0.12)',
+                border: '1px solid rgba(245,158,11,0.35)',
+                color: '#f59e0b',
+              }}
+            >
+              <p className="text-sm font-semibold">Waiting for operator approval</p>
+              <p className="text-xs mt-1">
+                Downpayment will open once your reservation is approved.
+              </p>
+            </div>
+          )}
+
+          {isAwaitingDownpayment && (
+            <div
+              className="mt-5 rounded-xl p-4"
+              style={{
+                background: 'rgba(37,151,233,0.12)',
+                border: '1px solid rgba(37,151,233,0.35)',
+              }}
+            >
+              <p className="text-sm font-semibold text-theme">
+                Your reservation is approved
+              </p>
+              <p className="text-xs text-muted-theme mt-1">
+                Please complete your downpayment to finalize your reservation.
+              </p>
+              <div className="mt-3 flex flex-col sm:flex-row sm:items-center gap-2">
+                <Button
+                  type="button"
+                  onClick={() => {
+                    setHasAcceptedPaymentTerms(false);
+                    setShowPaymentModal(true);
+                    setPaymentModalError('');
+                  }}
+                  className="h-9 w-full sm:w-auto"
+                >
+                  Pay Downpayment
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="h-9 w-full sm:w-auto"
+                  onClick={() => {
+                    void loadStatus({ silent: false });
+                  }}
+                >
+                  Refresh
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {isPaymentWindowExpired && (
+            <div
+              className="mt-5 rounded-xl p-4"
+              style={{
+                background: 'rgba(239,68,68,0.12)',
+                border: '1px solid rgba(239,68,68,0.35)',
+              }}
+            >
+              <p className="text-sm font-semibold" style={{ color: '#ef4444' }}>
+                Reservation payment window expired
+              </p>
+              <p className="text-xs text-muted-theme mt-1">
+                This reservation is no longer payable. Please create a new reservation to continue.
+              </p>
+              <div className="mt-3">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className="h-9"
+                  onClick={() => {
+                    window.location.href = '/reservation';
+                  }}
+                >
+                  Reserve Again
+                </Button>
+              </div>
+            </div>
+          )}
+
           <div
             className="mt-6 pt-5 border-t"
             style={{ borderColor: 'var(--tg-border)' }}
@@ -451,6 +810,54 @@ export default function ReservationStatusPage() {
                   <FaCheckCircle style={{ color: '#22c55e' }} />
                   Linked to your queued van
                 </p>
+                {canRateOperator && !operatorFeedback && (
+                  <div className="pt-1">
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="h-9"
+                      onClick={openRatingModal}
+                    >
+                      <FaStar size={12} className="mr-1.5" />
+                      Rate Operator
+                    </Button>
+                  </div>
+                )}
+                {operatorFeedback && (
+                  <div
+                    className="mt-3 rounded-xl p-3"
+                    style={{
+                      background: 'var(--tg-bg-alt)',
+                      border: '1px solid var(--tg-border)',
+                    }}
+                  >
+                    <p className="text-xs font-semibold text-muted-theme uppercase tracking-wide">
+                      Your Rating
+                    </p>
+                    <div className="mt-1.5 flex items-center gap-1">
+                      {Array.from({ length: 5 }, (_, idx) => (
+                        <FaStar
+                          key={`rated-star-${idx + 1}`}
+                          size={14}
+                          style={{
+                            color:
+                              idx + 1 <= Number(operatorFeedback.rating || 0)
+                                ? '#f59e0b'
+                                : '#9ca3af',
+                          }}
+                        />
+                      ))}
+                      <span className="ml-1 text-xs text-muted-theme">
+                        ({Number(operatorFeedback.rating || 0)}/5)
+                      </span>
+                    </div>
+                    {operatorFeedback.feedback && (
+                      <p className="mt-2 text-xs text-theme leading-relaxed">
+                        &ldquo;{operatorFeedback.feedback}&rdquo;
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             ) : (
               <p className="text-muted-theme text-sm">
@@ -463,6 +870,198 @@ export default function ReservationStatusPage() {
 
       
     </main>
+
+    {showPaymentModal && (
+      <div
+        className="fixed inset-0 z-[140] flex items-center justify-center p-4"
+        style={{ background: 'rgba(2, 6, 23, 0.65)' }}
+        onClick={() => {
+          if (isCreatingCheckout) return;
+          setShowPaymentModal(false);
+        }}
+      >
+        <div
+          className="w-full max-w-lg card-glow rounded-2xl p-6"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 className="text-xl font-bold text-theme mb-2">
+            Reservation Confirmed
+          </h3>
+            <p className="text-sm text-muted-theme leading-relaxed">
+              Your reservation is approved by the operator. Please pay the
+              downpayment to finalize your seat.
+            </p>
+          <div
+            className="mt-4 p-3 rounded-xl text-sm"
+            style={{
+              background: 'var(--tg-bg-alt)',
+              border: '1px solid var(--tg-border)',
+            }}
+          >
+            <p className="text-muted-theme">Downpayment Amount</p>
+              <p className="text-theme font-bold text-lg">
+                PHP {Number(reservation.amount_due || 0).toFixed(2)}
+              </p>
+            </div>
+            <div
+              className="mt-4 rounded-xl p-3 text-xs leading-relaxed"
+              style={{
+                background: 'rgba(245,158,11,0.1)',
+                border: '1px solid rgba(245,158,11,0.35)',
+                color: '#fbbf24',
+              }}
+            >
+              <p className="font-semibold">Payment Terms</p>
+              <p className="mt-1">
+                Downpayment is <span className="font-semibold">non-refundable</span>{' '}
+                once paid. Please review your route, seat, and passenger details
+                before proceeding.
+              </p>
+            </div>
+            <label
+              className="mt-3 flex items-start gap-2 text-xs cursor-pointer"
+              style={{ color: 'var(--tg-text)' }}
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5 h-4 w-4 cursor-pointer"
+                checked={hasAcceptedPaymentTerms}
+                onChange={(e) => setHasAcceptedPaymentTerms(e.target.checked)}
+                disabled={isCreatingCheckout}
+              />
+              <span>
+                I understand and agree that this downpayment is non-refundable.
+              </span>
+            </label>
+            {paymentModalError && (
+              <p className="mt-3 text-xs font-medium" style={{ color: '#ef4444' }}>
+                {paymentModalError}
+              </p>
+            )}
+          <div className="mt-6 flex items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setShowPaymentModal(false)}
+              disabled={isCreatingCheckout}
+            >
+              Later
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleStartDownpayment()}
+              disabled={isCreatingCheckout || !hasAcceptedPaymentTerms}
+            >
+              {isCreatingCheckout ? 'Opening checkout...' : 'Pay Now'}
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {showRatingModal && (
+      <div
+        className="fixed inset-0 z-[145] flex items-center justify-center p-4"
+        style={{ background: 'rgba(2, 6, 23, 0.65)' }}
+        onClick={() => {
+          if (ratingSubmitting) return;
+          setShowRatingModal(false);
+        }}
+      >
+        <div
+          className="w-full max-w-lg card-glow rounded-2xl p-6"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <h3 className="text-xl font-bold text-theme mb-1">Rate Your Operator</h3>
+          <p className="text-sm text-muted-theme">
+            Your feedback helps commuters find trusted operators.
+          </p>
+
+          <div className="mt-4">
+            <p className="text-xs font-semibold text-muted-theme uppercase tracking-wider mb-2">
+              Rating
+            </p>
+            <div className="flex items-center gap-2">
+              {Array.from({ length: 5 }, (_, idx) => {
+                const value = idx + 1;
+                const active = value <= ratingScore;
+                return (
+                  <button
+                    key={`rating-input-${value}`}
+                    type="button"
+                    onClick={() => setRatingScore(value)}
+                    className="h-10 w-10 rounded-full flex items-center justify-center cursor-pointer transition"
+                    style={{
+                      background: active
+                        ? 'rgba(245,158,11,0.18)'
+                        : 'var(--tg-bg-alt)',
+                      border: active
+                        ? '1px solid rgba(245,158,11,0.55)'
+                        : '1px solid var(--tg-border)',
+                      color: active ? '#f59e0b' : '#9ca3af',
+                    }}
+                    title={`${value} star${value > 1 ? 's' : ''}`}
+                  >
+                    <FaStar size={16} />
+                  </button>
+                );
+              })}
+              <span className="text-sm text-muted-theme">{ratingScore}/5</span>
+            </div>
+          </div>
+
+          <div className="mt-4">
+            <label
+              htmlFor="rating-feedback-input"
+              className="text-xs font-semibold text-muted-theme uppercase tracking-wider"
+            >
+              Feedback (Optional)
+            </label>
+            <textarea
+              id="rating-feedback-input"
+              value={ratingFeedback}
+              onChange={(e) => setRatingFeedback(e.target.value.slice(0, 500))}
+              rows={4}
+              placeholder="Share your experience with this operator."
+              className="mt-2 w-full rounded-xl px-3 py-2 text-sm resize-none"
+              style={{
+                background: 'var(--tg-bg-alt)',
+                border: '1px solid var(--tg-border)',
+                color: 'var(--tg-text)',
+              }}
+              disabled={ratingSubmitting}
+            />
+            <p className="mt-1 text-[11px] text-muted-theme text-right">
+              {ratingFeedback.length}/500
+            </p>
+          </div>
+
+          {ratingError && (
+            <p className="mt-2 text-xs font-medium" style={{ color: '#ef4444' }}>
+              {ratingError}
+            </p>
+          )}
+
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => setShowRatingModal(false)}
+              disabled={ratingSubmitting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void handleSubmitOperatorRating()}
+              disabled={ratingSubmitting}
+            >
+              {ratingSubmitting ? 'Submitting...' : 'Submit Rating'}
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
 
     {mounted &&
       createPortal(
